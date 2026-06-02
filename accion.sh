@@ -37,8 +37,8 @@ if ! adb_ok; then err "ADB no disponible. Accion $ACTION NO ejecutada."; exit 1;
 
 ADB="adb -s 127.0.0.1:5555 shell"
 
-# ── Resolución y helpers de tap escalado ─────────────────────────────────
-# Coordenadas base calibradas para 1440x3040. Se escalan a la resolución real.
+# ── Resolucion y helpers de tap escalado ─────────────────────────────────
+# Coordenadas base calibradas para 1440x3040. Se escalan a la resolucion real.
 SCREEN_SIZE=$($ADB wm size 2>/dev/null | grep -o '[0-9]*x[0-9]*' | tail -1)
 SW=$(echo "$SCREEN_SIZE" | cut -dx -f1)
 SH=$(echo "$SCREEN_SIZE" | cut -dx -f2)
@@ -59,10 +59,10 @@ swipe_b() {
     $ADB input swipe "$x1" "$y1" "$x2" "$y2" "$5"
 }
 
-# ── Detección dinámica del botón Play/Pause/Resume ────────────────────────
-# Solo funciona cuando el timer está PARADO o PAUSADO (UI idle).
+# ── Deteccion dinamica del boton Play/Pause/Resume ────────────────────────
+# Solo funciona cuando el timer esta PARADO o PAUSADO (UI idle).
 # Busca el nodo "Fichaje..." para anclar la zona del widget, luego encuentra
-# el elemento clickable más a la derecha en esa franja vertical.
+# el elemento clickable mas a la derecha en esa franja vertical.
 find_fichaje_play() {
     local TMP_XML="/data/local/tmp/holded_btn.xml"
     $ADB uiautomator dump --compressed "$TMP_XML" >/dev/null 2>&1 || return 1
@@ -110,12 +110,12 @@ sleep 3
 tap 240 2762   # tab Inicio
 sleep 2
 
-# ── Ejecutar acción ───────────────────────────────────────────────────────
+# ── Ejecutar accion ───────────────────────────────────────────────────────
 $ADB screencap -p "/data/local/tmp/fichaje_before_${ACTION}.png" 2>/dev/null
 
 case "$ACTION" in
     ENTRADA)
-        # Timer parado: detección dinámica disponible
+        # Timer parado: deteccion dinamica disponible
         PLAY_XY=$(find_fichaje_play)
         if [ -n "$PLAY_XY" ]; then
             px=$(echo "$PLAY_XY" | cut -d' ' -f1)
@@ -130,7 +130,7 @@ case "$ACTION" in
         sleep 2
         ;;
     INICIO_PAUSA)
-        # Timer corriendo: uiautomator falla. Pause = misma posición que Play cacheado.
+        # Timer corriendo: uiautomator falla. Pause = misma posicion que Play cacheado.
         if [ -f "$BTN_CACHE" ]; then
             coords=$(cat "$BTN_CACHE")
             $ADB input tap $coords
@@ -142,7 +142,7 @@ case "$ACTION" in
         sleep 2
         ;;
     FIN_PAUSA)
-        # Timer pausado: detección dinámica disponible
+        # Timer pausado: deteccion dinamica disponible
         PLAY_XY=$(find_fichaje_play)
         if [ -n "$PLAY_XY" ]; then
             px=$(echo "$PLAY_XY" | cut -d' ' -f1)
@@ -157,8 +157,8 @@ case "$ACTION" in
         sleep 2
         ;;
     SALIDA)
-        # Timer corriendo: Stop está a la izquierda de Play/Pause.
-        # Se calcula como Play_X - 176px (calibrado en 1440px) escalado a resolución real.
+        # Timer corriendo: Stop esta a la izquierda de Play/Pause.
+        # Se calcula como Play_X - 176px (calibrado en 1440px) escalado a resolucion real.
         if [ -f "$BTN_CACHE" ]; then
             play_x=$(cut -d' ' -f1 < "$BTN_CACHE")
             play_y=$(cut -d' ' -f2 < "$BTN_CACHE")
@@ -171,7 +171,7 @@ case "$ACTION" in
             log "[SALIDA] Stop por coordenadas escaladas (${SW}x${SH})"
         fi
         sleep 3
-        tap 719 2763   # Finalizar (diálogo centrado, siempre escalado)
+        tap 719 2763   # Finalizar (dialogo centrado, siempre escalado)
         sleep 2
         ;;
     *)

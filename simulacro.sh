@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Simulacro completo del día: ENTRADA → INICIO_PAUSA → FIN_PAUSA → SALIDA
+# Simulacro completo del dia: ENTRADA -> INICIO_PAUSA -> FIN_PAUSA -> SALIDA
 # Usa valores realistas de acumulado pero esperas cortas entre acciones.
 export PATH=/data/data/com.termux/files/usr/bin:$PATH
 HOME=/data/data/com.termux/files/home

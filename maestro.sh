@@ -70,7 +70,7 @@ err() {
     echo "[$fh] [$(date +%H:%M)] [MAESTRO] [ERROR] $*" >> "$LOG"
 }
 
-# ── Cargar configuración ──────────────────────────────────────────────────
+# ── Cargar configuracion ──────────────────────────────────────────────────
 
 ENTRADA_BASE="08:00"
 ENTRADA_VARIACION=16
@@ -105,8 +105,8 @@ adb_connect() {
 
 ADB="adb -s 127.0.0.1:5555 shell"
 
-# ── Resolución y helpers de tap escalado ─────────────────────────────────
-# Se detectan dentro de es_ausencia_holded() cuando ADB ya está conectado.
+# ── Resolucion y helpers de tap escalado ─────────────────────────────────
+# Se detectan dentro de es_ausencia_holded() cuando ADB ya esta conectado.
 _tap() {
     # Uso: _tap BASE_X BASE_Y  (requiere SW/SH definidos)
     local x=$(( $1 * SW / 1440 ))
@@ -179,7 +179,7 @@ es_ausencia_holded() {
         return 1
     fi
 
-    # Detectar resolución real para escalar taps
+    # Detectar resolucion real para escalar taps
     local SCREEN_SIZE
     SCREEN_SIZE=$($ADB wm size 2>/dev/null | grep -o '[0-9]*x[0-9]*' | tail -1)
     SW=$(echo "$SCREEN_SIZE" | cut -dx -f1); : "${SW:=1440}"
@@ -194,11 +194,11 @@ es_ausencia_holded() {
     sleep 1
     $ADB am start -n com.holded.app/com.holded.MainActivity 2>/dev/null
     sleep 5
-    $ADB input keyevent 3 2>/dev/null          # HOME (por si quedó algún panel)
+    $ADB input keyevent 3 2>/dev/null          # HOME (por si quedo algun panel)
     sleep 1
     $ADB am start -n com.holded.app/com.holded.MainActivity 2>/dev/null
     sleep 3
-    _tap 720 1460                              # "Próxima ausencia"
+    _tap 720 1460                              # "Proxima ausencia"
     sleep 3
     _tap 211 361                               # icono "Vista lista"
     sleep 4
@@ -229,7 +229,7 @@ es_ausencia_holded() {
     fi
 
     # Extraer fechas del listado en dos formatos:
-    # 1) Combinado: "24 Jun", "4 Sept", "3 Nov → 20 Nov"  (ausencias personales)
+    # 1) Combinado: "24 Jun", "4 Sept", "3 Nov - 20 Nov"  (ausencias personales)
     # 2) Separado:  "15" + "AUG" en elementos distintos   (festivos nacionales)
     local raw_texts
     raw_texts=$(echo "$xml_content" | grep -o 'text="[^"]*"' | sed 's/text="//;s/"//')
@@ -239,7 +239,7 @@ es_ausencia_holded() {
         | grep -iE '^[0-9]+ (ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|jan|aug|dec)' \
         | sed 's/ → / - /')
 
-    # Patrón: día → (tipo: Festivo/Vacaciones) → MES  (hasta 2 elementos entre medio)
+    # Patron: dia - (tipo: Festivo/Vacaciones) - MES  (hasta 2 elementos entre medio)
     separadas=$(echo "$raw_texts" | awk '
         /^[0-9]+$/ { day=$0; gap=0; next }
         day != "" && /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)$/ {
