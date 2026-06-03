@@ -5,8 +5,8 @@ export PATH=/data/data/com.termux/files/usr/bin:$PATH
 HOME=/data/data/com.termux/files/home
 export ADB_VENDOR_KEYS=$HOME/.android/adbkey
 
-ACCION="$HOME/fichaje/accion.sh"
-LOG="$HOME/fichaje/fichaje_simulacion.log"
+ACCION="$HOME/holdedMYBeer/accion.sh"
+LOG="$HOME/holdedMYBeer/fichaje_simulacion.log"
 ESPERA="${1:-8}"   # segundos entre acciones (default 8)
 
 # Valores de acumulado representativos de un L-J normal

@@ -4,10 +4,10 @@
 export PATH=/data/data/com.termux/files/usr/bin:$PATH
 export ADB_VENDOR_KEYS=$HOME/.android/adbkey
 
-LOG="$HOME/fichaje/fichaje_simulacion.log"
-AUSENCIAS="$HOME/fichaje/ausencias.txt"
-ACCION="$HOME/fichaje/accion.sh"
-CONFIG="$HOME/fichaje/horario.conf"
+LOG="$HOME/holdedMYBeer/fichaje_simulacion.log"
+AUSENCIAS="$HOME/holdedMYBeer/ausencias.txt"
+ACCION="$HOME/holdedMYBeer/accion.sh"
+CONFIG="$HOME/holdedMYBeer/horario.conf"
 UI_DUMP="/data/local/tmp/holded_ausencias.xml"
 
 # ── Helpers ──────────────────────────────────────────────────────────────

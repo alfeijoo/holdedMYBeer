@@ -1,4 +1,7 @@
-# Festivos nacionales 2026 (los que no aparecen en Holded como aprobados)
-15 ago
-12 oct
-1 nov
+# Ausencias manuales / periodos offline
+# Los festivos oficiales vienen automaticamente de la API de Holded
+# Usar solo para periodos sin conexion o ausencias no registradas en Holded
+# Formato: DD MMM  o  DD MMM - DD MMM (rango)
+# Ejemplo:
+# 24 dic
+# 27 dic - 30 dic

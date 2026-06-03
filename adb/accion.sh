@@ -3,8 +3,8 @@
 export PATH=/data/data/com.termux/files/usr/bin:$PATH
 export ADB_VENDOR_KEYS=$HOME/.android/adbkey
 
-LOG="$HOME/fichaje/fichaje_simulacion.log"
-BTN_CACHE="$HOME/fichaje/btn_coords.txt"
+LOG="$HOME/holdedMYBeer/fichaje_simulacion.log"
+BTN_CACHE="$HOME/holdedMYBeer/btn_coords.txt"
 ACTION="$1"
 ACUM_MIN="${2:-0}"
 

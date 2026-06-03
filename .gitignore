@@ -1,0 +1,6 @@
+telegram.conf
+ausencias_cache.json
+bot_offset.txt
+holdmybeer.log
+__pycache__/
+*.pyc
