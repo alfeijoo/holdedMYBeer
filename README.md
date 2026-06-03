@@ -224,7 +224,7 @@ La fuente primaria es siempre la API de Holded. `ausencias.txt` es fallback de u
 adb shell "python3 ~/holdedMYBeer/simulacro.py 8"
 
 # Ver log via Telegram
-# Enviar /log a SrRodaBot
+# Enviar /log al bot configurado en telegram.conf
 
 # Ver log directo
 adb shell "tail -30 /data/data/com.termux/files/home/holdedMYBeer/holdmybeer.log"
