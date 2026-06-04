@@ -22,6 +22,7 @@ holdedMYBeer/
 |- ausencias.txt    # Festivos de fallback manual
 |- telegram.conf    # Token y chat_id del bot (no en repo)
 |- telegram.conf.example  # Plantilla
+|- plan.json        # Plan del dia generado por maestro.py (runtime, no en repo)
 `- adb/             # Version legacy bash (obsoleta, referencia)
 ```
 
@@ -48,12 +49,18 @@ Cada at job ejecuta `accion.py` con la accion correspondiente. Este es el flujo 
    |- Quedan > 7 dias -> continuar
    `- Quedan <= 7 dias -> abrir Holded para refrescar + releer MMKV
 
-3. Ejecutar accion via REST API
+3. Si ACTION == SALIDA: comprobar tiempo acumulado real (ver ajuste adaptativo)
+   |- Tiempo suficiente -> continuar
+   `- Tiempo insuficiente -> dormir hasta completar las horas + continuar
+
+4. Ejecutar accion via REST API
    |- 2xx OK -> log + notificar Telegram (exito)
    |- 401 Unauthorized -> ejecutar relogin.py
    |    |- relogin OK -> reintentar accion
    |    `- relogin FALLO -> log + notificar Telegram + exit(1)
    `- Otro error -> log + notificar Telegram + exit(1)
+
+5. Si ACTION == ENTRADA o FIN_PAUSA: detectar retraso y reprogramar SALIDA si procede
 ```
 
 ### Acciones disponibles
@@ -80,6 +87,8 @@ Cada at job ejecuta `accion.py` con la accion correspondiente. Este es el flujo 
 | relogin FALLO | `❌ relogin FALLO — sesion no renovada` |
 | Token no encontrado tras relogin | `❌ ERROR: Token no encontrado tras relogin — accion NO ejecutada` |
 | Error API | `❌ ERROR ACCION: <codigo> - <detalle>` |
+| SALIDA reprogramada por retraso | `⏰ Retraso Xmin en ENTRADA → SALIDA reprogramada HH:MM→HH:MM` |
+| Salida anticipada, esperando | `⏳ Salida Xmin anticipada — esperando hasta HH:MM` |
 
 ## Proceso de planificacion (maestro.py)
 
@@ -95,9 +104,60 @@ Ejecutado cada noche a las 23:00 por cron:
 4. Calcular si manana es laborable
    |- Fin de semana / ausencia -> notificar frase divertida + no programar nada
    `- Dia laborable -> calcular tiempos aleatorios + programar 4 at jobs
-5. Notificar plan del dia via Telegram
+5. Guardar plan.json con tiempos planificados e IDs de los at jobs
+6. Notificar plan del dia via Telegram
    |- Jueves -> incluir proximo festivo con dias restantes
 ```
+
+## Ajuste adaptativo de SALIDA
+
+El demonio `atd` de Android puede ejecutar jobs con retraso (Doze mode, reinicio, etc.).
+Para garantizar exactamente 8h facturadas, el sistema usa dos mecanismos complementarios:
+
+### 1. Reprogramacion reactiva (ENTRADA / FIN_PAUSA)
+
+Cuando `at` ejecuta ENTRADA o FIN_PAUSA con >2 min de retraso respecto al plan:
+
+- Cancela el at job de SALIDA existente (`atrm`)
+- Crea uno nuevo desplazado el mismo numero de minutos
+- Actualiza `plan.json` con el nuevo job ID y hora
+- Notifica por Telegram
+
+Ejemplo: ENTRADA planificada 08:02, ejecutada 08:13 → SALIDA reprogramada de 17:02 a 17:13.
+
+### 2. Comprobacion activa antes del clock-out (SALIDA)
+
+Antes de llamar al endpoint de clock-out, `accion.py`:
+
+1. Lee `ENTRADA_TS` (timestamp real de la entrada) de `plan.json`
+2. Calcula `required_exit = ENTRADA_TS + (horas_total + pausa_dur) * 60`
+3. Si `now < required_exit` → duerme hasta `required_exit` y entonces ficha
+
+Esto actua de red de seguridad si la reprogramacion reactiva no se ejecuto o si el at job de SALIDA se lanza antes de tiempo.
+
+**`plan.json` — estructura en tiempo de ejecucion:**
+
+```json
+{
+  "date": "2026-06-05",
+  "scheduled": {
+    "ENTRADA": "08:02",
+    "FIN_PAUSA": "14:16",
+    "SALIDA": "17:13"
+  },
+  "jobs": {
+    "SALIDA": 83,
+    "FIN_PAUSA": 79
+  },
+  "horas_total": 480,
+  "pausa_dur": 60,
+  "actual": {
+    "ENTRADA_TS": 1748922780.0
+  }
+}
+```
+
+> `plan.json` se sobreescribe cada noche. No contiene datos sensibles pero esta en `.gitignore`.
 
 ## Proceso de re-login (relogin.py)
 

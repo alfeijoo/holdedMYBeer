@@ -2,5 +2,6 @@ telegram.conf
 ausencias_cache.json
 bot_offset.txt
 holdmybeer.log
+plan.json
 __pycache__/
 *.pyc

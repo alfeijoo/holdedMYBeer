@@ -320,6 +320,8 @@ def schedule(hhmm, action, acum, tomorrow_str):
     )
     if output:
         log(f"at {hhmm} {action}: {output.strip()}")
+    m = re.search(r'job (\d+)', proc.stderr)
+    return int(m.group(1)) if m else None
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
@@ -407,9 +409,21 @@ schedule(h_entrada, "ENTRADA", 0, t_str)
 
 if t_dow <= 4:
     schedule(h_pausa_ini, "INICIO_PAUSA", acum_pausa, t_str)
-    schedule(h_pausa_fin, "FIN_PAUSA",    acum_pausa, t_str)
+    job_fin_pausa = schedule(h_pausa_fin, "FIN_PAUSA", acum_pausa, t_str)
 
-schedule(h_salida, "SALIDA", total_min, t_str)
+job_salida = schedule(h_salida, "SALIDA", total_min, t_str)
+
+plan = {
+    "date": t_str,
+    "scheduled": {"ENTRADA": h_entrada, "SALIDA": h_salida},
+    "jobs": {"SALIDA": job_salida},
+    "horas_total": total_min,
+}
+if t_dow <= 4:
+    plan["scheduled"]["FIN_PAUSA"] = h_pausa_fin
+    plan["jobs"]["FIN_PAUSA"] = job_fin_pausa
+    plan["pausa_dur"] = pausa_dur
+(FICHAJE / "plan.json").write_text(json.dumps(plan))
 
 log(f"Jobs at programados para {t_str}: OK")
 log("-" * 40)

@@ -5,6 +5,7 @@ Uso: accion.py <ACTION> <ACUM_MIN>
 ACTION: ENTRADA | INICIO_PAUSA | FIN_PAUSA | SALIDA
 """
 
+import re
 import sys
 import os
 import json
@@ -18,11 +19,14 @@ from pathlib import Path
 
 # ── Rutas ─────────────────────────────────────────────────────────────────
 
-HOME    = Path("/data/data/com.termux/files/home")
-FICHAJE = HOME / "holdedMYBeer"
-LOG_FILE = FICHAJE / "holdmybeer.log"
-ADB_KEYS = HOME / ".android" / "adbkey"
-ADB_HOST = "127.0.0.1:5555"
+HOME      = Path("/data/data/com.termux/files/home")
+FICHAJE   = HOME / "holdedMYBeer"
+LOG_FILE  = FICHAJE / "holdmybeer.log"
+PLAN_FILE = FICHAJE / "plan.json"
+ACCION    = FICHAJE / "accion.py"
+PYTHON_PATH = "/data/data/com.termux/files/usr/bin/python3"
+ADB_KEYS  = HOME / ".android" / "adbkey"
+ADB_HOST  = "127.0.0.1:5555"
 
 os.environ["ADB_VENDOR_KEYS"] = str(ADB_KEYS)
 os.environ["PATH"] = "/data/data/com.termux/files/usr/bin:" + os.environ.get("PATH", "")
@@ -94,6 +98,84 @@ def log(msg):
 
 def err(msg):
     log(f"[ERROR] {msg}")
+
+# ── Reprogramacion adaptativa ────────────────────────────────────────────
+
+def _hhmm_to_min(hhmm):
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+def _min_to_hhmm(mins):
+    return f"{mins // 60:02d}:{mins % 60:02d}"
+
+def _load_plan():
+    if not PLAN_FILE.exists():
+        return None
+    try:
+        plan = json.loads(PLAN_FILE.read_text())
+        today = datetime.now().strftime("%Y-%m-%d")
+        return plan if plan.get("date") == today else None
+    except Exception:
+        return None
+
+def _reschedule_salida(plan, delay_min):
+    salida_job = plan["jobs"].get("SALIDA")
+    current_salida = plan["scheduled"].get("SALIDA")
+    if not salida_job or not current_salida:
+        return
+    new_min = _hhmm_to_min(current_salida) + delay_min
+    new_hhmm = _min_to_hhmm(new_min)
+    today = datetime.now().strftime("%Y-%m-%d")
+    subprocess.run(["atrm", str(salida_job)], capture_output=True)
+    horas_total = plan.get("horas_total", 480)
+    cmd = f"{PYTHON_PATH} {ACCION} SALIDA {horas_total}"
+    proc = subprocess.run(
+        ["at", new_hhmm, today],
+        input=cmd + "\n",
+        capture_output=True, text=True
+    )
+    m = re.search(r'job (\d+)', proc.stderr)
+    if m:
+        plan["jobs"]["SALIDA"] = int(m.group(1))
+    plan["scheduled"]["SALIDA"] = new_hhmm
+    PLAN_FILE.write_text(json.dumps(plan))
+    msg = f"⏰ Retraso {delay_min}min en {ACTION} → SALIDA reprogramada {current_salida}→{new_hhmm}"
+    log(msg)
+    notify(msg)
+
+def _check_and_reschedule():
+    plan = _load_plan()
+    if not plan:
+        return
+    scheduled_hhmm = plan["scheduled"].get(ACTION)
+    if not scheduled_hhmm:
+        return
+    now = datetime.now()
+    if ACTION == "ENTRADA":
+        plan.setdefault("actual", {})["ENTRADA_TS"] = now.timestamp()
+        PLAN_FILE.write_text(json.dumps(plan))
+    actual_min = now.hour * 60 + now.minute
+    delay = actual_min - _hhmm_to_min(scheduled_hhmm)
+    if delay > 2:
+        _reschedule_salida(plan, delay)
+
+def _wait_if_short():
+    plan = _load_plan()
+    if not plan:
+        return
+    entry_ts = plan.get("actual", {}).get("ENTRADA_TS")
+    if entry_ts is None:
+        return
+    pausa_dur = plan.get("pausa_dur", 0)
+    horas_total = plan.get("horas_total", 480)
+    required_exit_ts = entry_ts + (horas_total + pausa_dur) * 60
+    wait_sec = required_exit_ts - datetime.now().timestamp()
+    if wait_sec > 10:
+        required_hhmm = datetime.fromtimestamp(required_exit_ts).strftime("%H:%M")
+        msg = f"⏳ Salida {round(wait_sec / 60)}min anticipada — esperando hasta {required_hhmm}"
+        log(msg)
+        notify(msg)
+        time.sleep(wait_sec)
 
 # ── Token ─────────────────────────────────────────────────────────────────
 
@@ -241,6 +323,9 @@ if not token or not account_id:
         notify(f"❌ ERROR: {msg}")
         sys.exit(1)
 
+if ACTION == "SALIDA":
+    _wait_if_short()
+
 status, body = run_action(token, account_id)
 
 if status == 401:
@@ -263,6 +348,8 @@ MENSAJES = {
 if status and status < 400:
     log(f"[{ACTION}] OK → {body[:80]}")
     notify(MENSAJES.get(ACTION, f"✅ {ACTION} OK"))
+    if ACTION in ("ENTRADA", "FIN_PAUSA"):
+        _check_and_reschedule()
 else:
     err(f"[{ACTION}] FALLO {status}: {body}")
     notify(f"❌ ERROR {ACTION}: {status} — {body[:100]}")
