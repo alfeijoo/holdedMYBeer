@@ -118,46 +118,56 @@ def _load_plan():
     except Exception:
         return None
 
-def _reschedule_salida(plan, delay_min):
-    salida_job = plan["jobs"].get("SALIDA")
-    current_salida = plan["scheduled"].get("SALIDA")
-    if not salida_job or not current_salida:
-        return
-    new_min = _hhmm_to_min(current_salida) + delay_min
-    new_hhmm = _min_to_hhmm(new_min)
-    today = datetime.now().strftime("%Y-%m-%d")
-    subprocess.run(["atrm", str(salida_job)], capture_output=True)
-    horas_total = plan.get("horas_total", 480)
-    cmd = f"{PYTHON_PATH} {ACCION} SALIDA {horas_total}"
-    proc = subprocess.run(
-        ["at", new_hhmm, today],
-        input=cmd + "\n",
-        capture_output=True, text=True
-    )
-    m = re.search(r'job (\d+)', proc.stderr)
-    if m:
-        plan["jobs"]["SALIDA"] = int(m.group(1))
-    plan["scheduled"]["SALIDA"] = new_hhmm
-    PLAN_FILE.write_text(json.dumps(plan))
-    msg = f"⏰ Retraso {delay_min}min en {ACTION} → SALIDA reprogramada {current_salida}→{new_hhmm}"
-    log(msg)
-    notify(msg)
-
-def _check_and_reschedule():
+def _update_plan():
+    """Carga el plan una vez, guarda el TS de la accion y reprograma SALIDA si hay retraso. Una sola escritura."""
     plan = _load_plan()
     if not plan:
         return
+    now = datetime.now()
+    actual_min = now.hour * 60 + now.minute
+    actual = plan.setdefault("actual", {})
+    actual[f"{ACTION}_TS"] = now.timestamp()
+
     scheduled_hhmm = plan["scheduled"].get(ACTION)
     if not scheduled_hhmm:
-        return
-    now = datetime.now()
-    if ACTION == "ENTRADA":
-        plan.setdefault("actual", {})["ENTRADA_TS"] = now.timestamp()
         PLAN_FILE.write_text(json.dumps(plan))
-    actual_min = now.hour * 60 + now.minute
-    delay = actual_min - _hhmm_to_min(scheduled_hhmm)
-    if delay > 2:
-        _reschedule_salida(plan, delay)
+        return
+
+    if ACTION == "ENTRADA":
+        delay = actual_min - _hhmm_to_min(scheduled_hhmm)
+    elif ACTION == "FIN_PAUSA":
+        inicio_ts = actual.get("INICIO_PAUSA_TS")
+        pausa_dur = plan.get("pausa_dur", 60)
+        if inicio_ts:
+            inicio_min = datetime.fromtimestamp(inicio_ts).hour * 60 + datetime.fromtimestamp(inicio_ts).minute
+            delay = actual_min - (inicio_min + pausa_dur)
+        else:
+            delay = actual_min - _hhmm_to_min(scheduled_hhmm)
+    else:
+        delay = 0
+
+    if delay > 0:
+        salida_job = plan["jobs"].get("SALIDA")
+        current_salida = plan["scheduled"].get("SALIDA")
+        if salida_job and current_salida:
+            new_min   = _hhmm_to_min(current_salida) + delay
+            new_hhmm  = _min_to_hhmm(new_min)
+            today     = now.strftime("%Y-%m-%d")
+            subprocess.run(["atrm", str(salida_job)], capture_output=True)
+            horas_total = plan.get("horas_total", 480)
+            cmd  = f"{PYTHON_PATH} {ACCION} SALIDA {horas_total}"
+            proc = subprocess.run(["at", new_hhmm, today], input=cmd + "\n", capture_output=True, text=True)
+            m = re.search(r'job (\d+)', proc.stderr)
+            if m:
+                plan["jobs"]["SALIDA"] = int(m.group(1))
+            plan["scheduled"]["SALIDA"] = new_hhmm
+            PLAN_FILE.write_text(json.dumps(plan))
+            msg = f"⏰ Retraso {delay}min en {ACTION} → SALIDA reprogramada {current_salida}→{new_hhmm}"
+            log(msg)
+            notify(msg)
+            return
+
+    PLAN_FILE.write_text(json.dumps(plan))
 
 def _wait_if_short():
     plan = _load_plan()
@@ -166,9 +176,14 @@ def _wait_if_short():
     entry_ts = plan.get("actual", {}).get("ENTRADA_TS")
     if entry_ts is None:
         return
-    pausa_dur = plan.get("pausa_dur", 0)
     horas_total = plan.get("horas_total", 480)
-    required_exit_ts = entry_ts + (horas_total + pausa_dur) * 60
+    inicio_ts = plan.get("actual", {}).get("INICIO_PAUSA_TS")
+    fin_ts    = plan.get("actual", {}).get("FIN_PAUSA_TS")
+    if inicio_ts and fin_ts:
+        pausa_sec = fin_ts - inicio_ts
+    else:
+        pausa_sec = plan.get("pausa_dur", 0) * 60
+    required_exit_ts = entry_ts + horas_total * 60 + pausa_sec
     wait_sec = required_exit_ts - datetime.now().timestamp()
     if wait_sec > 10:
         required_hhmm = datetime.fromtimestamp(required_exit_ts).strftime("%H:%M")
@@ -348,8 +363,8 @@ MENSAJES = {
 if status and status < 400:
     log(f"[{ACTION}] OK → {body[:80]}")
     notify(MENSAJES.get(ACTION, f"✅ {ACTION} OK"))
-    if ACTION in ("ENTRADA", "FIN_PAUSA"):
-        _check_and_reschedule()
+    if ACTION in ("ENTRADA", "INICIO_PAUSA", "FIN_PAUSA"):
+        _update_plan()
 else:
     err(f"[{ACTION}] FALLO {status}: {body}")
     notify(f"❌ ERROR {ACTION}: {status} — {body[:100]}")

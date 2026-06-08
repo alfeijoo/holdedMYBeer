@@ -39,8 +39,9 @@ def _help_text():
 /salida   - Fichar salida
 /estado   - Estado del timer actual
 /log      - Ultimas lineas del log
-/plan     - Jobs programados (at)
-/help     - Este mensaje"""
+/plan        - Jobs programados (at)
+/recalcular  - Recalcular y reprogramar salida
+/help        - Este mensaje"""
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────
@@ -123,7 +124,11 @@ def cmd_fichar(action):
             if tracker:
                 start = tracker.get("startTimestamp") or tracker.get("start")
                 if start:
-                    acum = int((datetime.now(timezone.utc).timestamp() - start / 1000) / 60)
+                    try:
+                        start_ts = int(start) / 1000
+                    except (ValueError, TypeError):
+                        start_ts = datetime.fromisoformat(str(start)).timestamp()
+                    acum = int((datetime.now(timezone.utc).timestamp() - start_ts) / 60)
 
     reply(f"⏳ Procesando {action}...")
     subprocess.run([PYTHON, str(ACCION), action, str(acum)])
@@ -139,6 +144,12 @@ def cmd_estado():
         return "⏹ Timer parado — sin fichaje activo"
 
     start_ms = tracker.get("startTimestamp") or tracker.get("start")
+    if start_ms:
+        try:
+            start_ms = int(start_ms)
+        except (ValueError, TypeError):
+            from datetime import timezone as _tz
+            start_ms = int(datetime.fromisoformat(str(start_ms)).timestamp() * 1000)
     estado   = tracker.get("status", "?")
     tid      = tracker.get("id", "?")
 
@@ -216,6 +227,84 @@ def cmd_log():
     return text[:4000] if len(text) > 4000 else text
 
 
+def cmd_recalcular():
+    plan_file = FICHAJE / "plan.json"
+    if not plan_file.exists():
+        return "❌ Sin plan.json para hoy"
+    try:
+        plan = json.loads(plan_file.read_text())
+    except Exception:
+        return "❌ plan.json corrupto"
+
+    if plan.get("date") != datetime.now().strftime("%Y-%m-%d"):
+        return "❌ plan.json no es de hoy"
+
+    actual = plan.get("actual", {})
+    entrada_ts = actual.get("ENTRADA_TS")
+    if not entrada_ts:
+        return "❌ Sin ENTRADA registrada hoy"
+
+    horas_total = plan.get("horas_total", 480)
+    inicio_ts   = actual.get("INICIO_PAUSA_TS")
+    fin_ts      = actual.get("FIN_PAUSA_TS")
+
+    if inicio_ts and fin_ts:
+        pausa_sec = fin_ts - inicio_ts
+        inicio_hhmm = datetime.fromtimestamp(inicio_ts).strftime("%H:%M")
+        fin_hhmm    = datetime.fromtimestamp(fin_ts).strftime("%H:%M")
+        pausa_str = f"{inicio_hhmm}-{fin_hhmm} ({int(pausa_sec // 60)}min)"
+    elif inicio_ts:
+        inicio_hhmm = datetime.fromtimestamp(inicio_ts).strftime("%H:%M")
+        pausa_sec = plan.get("pausa_dur", 0) * 60
+        pausa_str = f"{inicio_hhmm}-? (en pausa, {int(pausa_sec // 60)}min plan.)"
+    else:
+        pausa_sec = plan.get("pausa_dur", 0) * 60
+        pausa_str = f"planificada {int(pausa_sec // 60)}min"
+
+    required_ts   = entrada_ts + horas_total * 60 + pausa_sec
+    required_dt   = datetime.fromtimestamp(required_ts)
+    required_hhmm = required_dt.strftime("%H:%M")
+    required_min  = required_dt.hour * 60 + required_dt.minute
+
+    entrada_hhmm  = datetime.fromtimestamp(entrada_ts).strftime("%H:%M")
+    current_salida = plan["scheduled"].get("SALIDA", "?")
+
+    def _hhmm_to_min(hhmm):
+        h, m = hhmm.split(":")
+        return int(h) * 60 + int(m)
+
+    lines = [
+        "📊 Recálculo salida:",
+        f"🟢 Entrada real : {entrada_hhmm}",
+        f"⏸ Pausa        : {pausa_str}",
+        f"⏱ Horas        : {horas_total // 60}h{horas_total % 60:02d}m",
+        f"🔴 Salida exacta: {required_hhmm}",
+    ]
+
+    current_min = _hhmm_to_min(current_salida) if ":" in current_salida else None
+    if current_min is not None and current_min != required_min:
+        salida_job = plan["jobs"].get("SALIDA")
+        if salida_job:
+            subprocess.run(["atrm", str(salida_job)], capture_output=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        cmd   = f"{PYTHON} {ACCION} SALIDA {horas_total}"
+        proc  = subprocess.run(
+            ["at", required_hhmm, today],
+            input=cmd + "\n",
+            capture_output=True, text=True
+        )
+        m = re.search(r'job (\d+)', proc.stderr)
+        if m:
+            plan["jobs"]["SALIDA"] = int(m.group(1))
+        plan["scheduled"]["SALIDA"] = required_hhmm
+        plan_file.write_text(json.dumps(plan))
+        lines.append(f"⚠️ Reprogramada: {current_salida} → {required_hhmm}")
+    else:
+        lines.append("✅ Salida ya correcta")
+
+    return "\n".join(lines)
+
+
 def cmd_plan():
     r = subprocess.run(["atq"], capture_output=True, text=True)
     if not r.stdout.strip():
@@ -250,6 +339,8 @@ def handle(text):
         reply(cmd_log())
     elif cmd == "/plan":
         reply(cmd_plan())
+    elif cmd == "/recalcular":
+        reply(cmd_recalcular())
     elif cmd in ("/help", "/start", "/ayuda"):
         reply(_help_text())
     else:
@@ -258,24 +349,48 @@ def handle(text):
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
-offset = int(OFFSET.read_text()) if OFFSET.exists() else 0
-updates = tg_get(f"getUpdates?offset={offset}&timeout=0&allowed_updates=[\"message\"]")
+import time as _time
 
-if not updates or not updates.get("ok"):
+PID_FILE = FICHAJE / "bot.pid"
+
+def _already_running():
+    if not PID_FILE.exists():
+        return False
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        Path(f"/proc/{pid}").stat()
+        return pid != os.getpid()
+    except Exception:
+        return False
+
+def _process_updates(updates, offset):
+    for upd in updates["result"]:
+        new_offset = upd["update_id"] + 1
+        if new_offset > offset:
+            offset = new_offset
+        msg     = upd.get("message", {})
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        text    = msg.get("text", "")
+        if chat_id == TG_CHAT_ID and text.startswith("/"):
+            handle(text)
+    return offset
+
+if _already_running():
     sys.exit(0)
 
-for upd in updates["result"]:
-    new_offset = upd["update_id"] + 1
-    if new_offset > offset:
-        offset = new_offset
+PID_FILE.write_text(str(os.getpid()))
 
-    msg     = upd.get("message", {})
-    chat_id = str(msg.get("chat", {}).get("id", ""))
-    text    = msg.get("text", "")
-
-    if chat_id != TG_CHAT_ID or not text.startswith("/"):
-        continue
-
-    handle(text)
-
-OFFSET.write_text(str(offset))
+try:
+    offset = int(OFFSET.read_text()) if OFFSET.exists() else 0
+    while True:
+        updates = tg_get(f"getUpdates?offset={offset}&timeout=30&allowed_updates=%5B%22message%22%5D")
+        if updates and updates.get("ok"):
+            offset = _process_updates(updates, offset)
+            OFFSET.write_text(str(offset))
+        else:
+            _time.sleep(5)
+finally:
+    try:
+        PID_FILE.unlink()
+    except Exception:
+        pass
