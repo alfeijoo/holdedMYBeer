@@ -61,6 +61,8 @@ Cada at job ejecuta `accion.py` con la accion correspondiente. Este es el flujo 
    `- Otro error -> log + notificar Telegram + exit(1)
 
 5. Si ACTION == ENTRADA o FIN_PAUSA: detectar retraso y reprogramar SALIDA si procede
+
+6. Si ACTION == SALIDA: correccion automatica post-fichaje (ver seccion dedicada)
 ```
 
 ### Acciones disponibles
@@ -80,6 +82,8 @@ Cada at job ejecuta `accion.py` con la accion correspondiente. Este es el flujo 
 | Pausa OK | `⏸ Pausa iniciada` |
 | Resume OK | `▶️ De vuelta al trabajo` |
 | Salida OK | `🏁 Salida fichada - total: Xh00m` |
+| Fichaje corregido | `✅ Fichaje corregido: salida HH:MM→HH:MM (+Xmin)` |
+| Correc. fallo | `❌ CORREC FALLO: <codigo>` |
 | JWT expira pronto | `🔑 JWT expira pronto — refrescando token` |
 | Token no encontrado | `🔑 Token no encontrado — ejecutando re-login` |
 | Sesion caducada (401) | `🔑 Sesion caducada — ejecutando re-login` |
@@ -108,6 +112,26 @@ Ejecutado cada noche a las 23:00 por cron:
 6. Notificar plan del dia via Telegram
    |- Jueves -> incluir proximo festivo con dias restantes
 ```
+
+## Corrección automatica post-fichaje
+
+Inmediatamente despues de que SALIDA es confirmada por Holded, `accion.py` consulta el tiempo real registrado y lo ajusta si hay desviacion:
+
+```
+1. GET /internal/team/v2/day-timetracking?date=HOY
+   -> leer effectiveWorkedTime (segundos netos reales en Holded)
+2. delta = real - objetivo (HORAS_LJ o HORAS_V segun dia)
+3. Si delta == 0 -> no tocar nada
+4. Si delta != 0 ->
+   PUT /internal/team/v2/bulk-timetracking-update
+   -> nuevo end = end_actual - delta (en local timezone)
+   -> pauses se preservan en formato HH:MM
+   -> notificar Telegram
+```
+
+Ejemplo: fichado 8h04m, objetivo 8h → salida corregida 4 min antes en Holded.
+
+Esta correccion actua sobre el registro de Holded del dia actual, sin tocar la planificacion de dias futuros.
 
 ## Ajuste adaptativo de SALIDA
 
@@ -196,8 +220,29 @@ Solo accesible con root via ADB. No se cachea localmente - se lee en cada ejecuc
 | Pausa | POST | app.holded.com | `/internal/team/tracker/pause` |
 | Resume | POST | app.holded.com | `/internal/team/tracker/resume` |
 | Ausencias | GET | app.holded.com | `/internal/team/v2/timeoff-year-summary?year=YYYY` |
+| Leer dia | GET | app.holded.com | `/internal/team/v2/day-timetracking?date=YYYY-MM-DDT00:00:00+HH:MM` |
+| Actualizar registro | PUT | app.holded.com | `/internal/team/v2/bulk-timetracking-update` |
+
+Auth: headers `token: <JWT>` y `accountid: <account_id>` en todas las llamadas.
 
 > `mobile.holded.com` redirige POST como GET (405). Usar `app.holded.com` para escritura.
+
+### Body PUT bulk-timetracking-update
+
+```json
+{
+  "trackers": [{
+    "id": "<tracker_id>",
+    "workplaceId": null,
+    "isRemote": false,
+    "start": "YYYY-MM-DDTHH:MM:SS+HH:MM",
+    "end":   "YYYY-MM-DDTHH:MM:SS+HH:MM",
+    "pauses": [
+      {"start": "HH:MM", "end": "HH:MM"}
+    ]
+  }]
+}
+```
 
 ## Bot Telegram
 
@@ -212,6 +257,9 @@ Permite controlar el fichaje manualmente desde Telegram.
 | `/estado` | Estado actual del timer via API |
 | `/log` | Ultimas jornadas del log (formato legible, agrupado por dia) |
 | `/plan` | Jobs at programados para hoy |
+| `/corregir` | Revisar y corregir fichaje (ayer por defecto) |
+| `/corregir DD-MM-YYYY` | Revisar y corregir fichaje de fecha concreta |
+| `/recalcular` | Recalcular y reprogramar at jobs del dia |
 | `/help` | Lista de comandos |
 
 ## Instalacion en el dispositivo

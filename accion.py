@@ -14,7 +14,8 @@ import time
 import subprocess
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import urllib.parse
 from pathlib import Path
 
 # ── Rutas ─────────────────────────────────────────────────────────────────
@@ -301,6 +302,71 @@ def pause(token, account_id, tracker_id):
 def resume(token, account_id, tracker_id):
     return api("POST", BASE_APP, "/internal/team/tracker/resume", token, account_id, {"trackerId": tracker_id})
 
+# ── Corrección post-salida ────────────────────────────────────────────────
+
+def corregir_salida(token, account_id):
+    dow       = datetime.now().isoweekday()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    horas_lj  = int(_CONF.get("HORAS_LJ", "480").split("#")[0].strip())
+    horas_v   = int(_CONF.get("HORAS_V",  "330").split("#")[0].strip())
+    target    = horas_lj if dow <= 4 else horas_v
+
+    tz_offset  = datetime.now().astimezone().strftime("%z")
+    tz_colon   = tz_offset[:3] + ":" + tz_offset[3:]
+    date_param = urllib.parse.quote(f"{today_str}T00:00:00{tz_colon}")
+
+    status, body = api("GET", BASE_APP, f"/internal/team/v2/day-timetracking?date={date_param}", token, account_id)
+    if status != 200:
+        err(f"[CORREC] GET day-timetracking: {status}")
+        return
+    try:
+        data = json.loads(body)
+    except Exception:
+        err(f"[CORREC] JSON parse error")
+        return
+
+    trackers = data.get("trackers", [])
+    if not trackers or not trackers[0].get("done"):
+        log(f"[CORREC] Sin tracker completado para {today_str}")
+        return
+
+    tracker       = trackers[0]
+    effective_min = round(tracker.get("effectiveWorkedTime", 0) / 60)
+    delta         = effective_min - target
+
+    log(f"[CORREC] real={effective_min}min objetivo={target}min delta={delta:+d}min")
+
+    if delta == 0:
+        return
+
+    end_dt   = datetime.fromisoformat(tracker["end"])
+    new_end  = (end_dt - timedelta(minutes=delta)).astimezone()
+    old_hhmm = end_dt.astimezone().strftime("%H:%M")
+    new_hhmm = new_end.strftime("%H:%M")
+
+    pauses = [
+        {"start": datetime.fromisoformat(p["start"]).astimezone().strftime("%H:%M"),
+         "end":   datetime.fromisoformat(p["end"]).astimezone().strftime("%H:%M")}
+        for p in tracker.get("pauses", [])
+    ]
+    put_body = {"trackers": [{
+        "id":          tracker["id"],
+        "workplaceId": tracker.get("workplaceId"),
+        "isRemote":    False,
+        "start":       tracker["startDateWithTimeZone"],
+        "end":         new_end.isoformat(),
+        "pauses":      pauses,
+    }]}
+
+    s2, b2 = api("PUT", BASE_APP, "/internal/team/v2/bulk-timetracking-update", token, account_id, put_body)
+    if s2 and s2 < 400:
+        msg = f"✅ Fichaje corregido: salida {old_hhmm}→{new_hhmm} ({delta:+d}min)"
+        log(f"[CORREC] {msg}")
+        notify(msg)
+    else:
+        err(f"[CORREC] PUT: {s2} {b2[:100]}")
+        notify(f"❌ CORREC FALLO: {s2}")
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def run_action(token, account_id):
@@ -365,6 +431,8 @@ if status and status < 400:
     notify(MENSAJES.get(ACTION, f"✅ {ACTION} OK"))
     if ACTION in ("ENTRADA", "INICIO_PAUSA", "FIN_PAUSA"):
         _update_plan()
+    elif ACTION == "SALIDA":
+        corregir_salida(token, account_id)
 else:
     err(f"[{ACTION}] FALLO {status}: {body}")
     notify(f"❌ ERROR {ACTION}: {status} — {body[:100]}")

@@ -12,7 +12,7 @@ import base64
 import subprocess
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 HOME    = Path("/data/data/com.termux/files/home")
@@ -22,9 +22,10 @@ OFFSET  = FICHAJE / "bot_offset.txt"
 PYTHON  = "/data/data/com.termux/files/usr/bin/python3"
 ACCION  = FICHAJE / "accion.py"
 
-ADB_HOST = "127.0.0.1:5555"
-ADB_KEYS = str(HOME / ".android" / "adbkey")
+ADB_HOST    = "127.0.0.1:5555"
+ADB_KEYS    = str(HOME / ".android" / "adbkey")
 BASE_MOBILE = "https://mobile.holded.com"
+BASE_APP    = "https://app.holded.com"
 
 os.environ["ADB_VENDOR_KEYS"] = ADB_KEYS
 os.environ["PATH"] = "/data/data/com.termux/files/usr/bin:" + os.environ.get("PATH", "")
@@ -41,6 +42,7 @@ def _help_text():
 /log      - Ultimas lineas del log
 /plan        - Jobs programados (at)
 /recalcular  - Recalcular y reprogramar salida
+/corregir    - Corregir fichaje (ayer por defecto, o /corregir DD-MM-YYYY)
 /help        - Este mensaje"""
 
 
@@ -111,6 +113,125 @@ def _get_tracker(token, account_id):
     except Exception:
         pass
     return None
+
+
+# ── API helpers ───────────────────────────────────────────────────────────
+
+def _load_conf():
+    cfg = {}
+    conf = FICHAJE / "horario.conf"
+    if conf.exists():
+        for line in conf.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.split("#")[0].strip().strip('"')
+    return cfg
+
+def _api_get(path, token, account_id, base=BASE_APP):
+    req = urllib.request.Request(base + path, method="GET")
+    req.add_header("token", token)
+    req.add_header("accountid", account_id)
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+    except Exception:
+        return None, {}
+
+def _api_put(path, token, account_id, body, base=BASE_APP):
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(base + path, data=data, method="PUT")
+    req.add_header("token", token)
+    req.add_header("accountid", account_id)
+    req.add_header("Accept", "application/json")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+    except Exception:
+        return None, {}
+
+def _corregir_fecha(date_str, target_min, token, account_id):
+    import urllib.parse
+    tz_offset = datetime.now().astimezone().strftime("%z")
+    tz_colon  = tz_offset[:3] + ":" + tz_offset[3:]
+    date_param = urllib.parse.quote(f"{date_str}T00:00:00{tz_colon}")
+
+    status, data = _api_get(f"/internal/team/v2/day-timetracking?date={date_param}", token, account_id)
+    if status != 200:
+        return f"❌ GET day-timetracking {date_str}: status={status}"
+
+    trackers = data.get("trackers", [])
+    if not trackers:
+        return f"❌ Sin trackers en Holded para {date_str}"
+
+    tracker = trackers[0]
+    if not tracker.get("done"):
+        return f"⚠️ Tracker de {date_str} aún en curso"
+
+    effective_min = round(tracker.get("effectiveWorkedTime", 0) / 60)
+    delta = effective_min - target_min
+
+    if delta == 0:
+        return f"✅ {date_str}: {effective_min}min = objetivo {target_min}min. Sin corrección."
+
+    end_dt   = datetime.fromisoformat(tracker["end"])
+    new_end  = (end_dt - timedelta(minutes=delta)).astimezone()
+    old_hhmm = end_dt.astimezone().strftime("%H:%M")
+    new_hhmm = new_end.strftime("%H:%M")
+
+    pauses = [
+        {"start": datetime.fromisoformat(p["start"]).astimezone().strftime("%H:%M"),
+         "end":   datetime.fromisoformat(p["end"]).astimezone().strftime("%H:%M")}
+        for p in tracker.get("pauses", [])
+    ]
+
+    body = {"trackers": [{
+        "id":          tracker["id"],
+        "workplaceId": tracker.get("workplaceId"),
+        "isRemote":    False,
+        "start":       tracker["startDateWithTimeZone"],
+        "end":         new_end.isoformat(),
+        "pauses":      pauses,
+    }]}
+
+    status2, resp2 = _api_put("/internal/team/v2/bulk-timetracking-update", token, account_id, body)
+    if status2 and status2 < 400:
+        return (f"✅ {date_str}: fichado={effective_min}min objetivo={target_min}min\n"
+                f"Salida corregida: {old_hhmm}→{new_hhmm} ({delta:+d}min)")
+    else:
+        return (f"❌ PUT bulk-timetracking-update: status={status2}\n"
+                f"fichado={effective_min}min objetivo={target_min}min ({delta:+d}min)")
+
+def cmd_corregir(date_arg=None):
+    token, account_id = _read_mmkv()
+    if not token or not account_id:
+        return "❌ No se pudo leer token de MMKV"
+
+    cfg      = _load_conf()
+    horas_lj = int(cfg.get("HORAS_LJ", "480"))
+    horas_v  = int(cfg.get("HORAS_V",  "330"))
+
+    if date_arg:
+        try:
+            d = datetime.strptime(date_arg, "%d-%m-%Y").date()
+        except ValueError:
+            return "❌ Formato incorrecto. Usa: /corregir DD-MM-YYYY (ej: /corregir 11-06-2026)"
+    else:
+        d = datetime.now().date() - timedelta(days=1)
+        while d.isoweekday() >= 6:
+            d -= timedelta(days=1)
+
+    if d.isoweekday() >= 6:
+        return f"❌ {d} es fin de semana — no hay fichaje que corregir"
+
+    target = horas_lj if d.isoweekday() <= 4 else horas_v
+    return _corregir_fecha(d.strftime("%Y-%m-%d"), target, token, account_id)
 
 
 # ── Comandos ──────────────────────────────────────────────────────────────
@@ -341,6 +462,9 @@ def handle(text):
         reply(cmd_plan())
     elif cmd == "/recalcular":
         reply(cmd_recalcular())
+    elif cmd == "/corregir":
+        parts = text.strip().split()
+        reply(cmd_corregir(parts[1] if len(parts) > 1 else None))
     elif cmd in ("/help", "/start", "/ayuda"):
         reply(_help_text())
     else:

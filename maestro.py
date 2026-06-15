@@ -156,6 +156,7 @@ def api_get(path, token, account_id, base=BASE_APP):
     except Exception:
         return None, {}
 
+
 def _parse_ausencias_txt():
     dias = set()
     if not AUSENCIAS.exists():
