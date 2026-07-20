@@ -17,6 +17,8 @@ import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import horario_conf
+
 HOME    = Path("/data/data/com.termux/files/home")
 FICHAJE = HOME / "holdedMYBeer"
 ADB_KEYS = HOME / ".android" / "adbkey"
@@ -47,22 +49,12 @@ except ValueError:
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-def load_conf():
-    cfg = {}
-    conf = FICHAJE / "horario.conf"
-    if conf.exists():
-        for line in conf.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.split("#")[0].strip().strip('"')
-    return cfg
-
-cfg      = load_conf()
-HORAS_LJ = int(cfg.get("HORAS_LJ", "480"))
-HORAS_V  = int(cfg.get("HORAS_V",  "330"))
-dow      = check_date.isoweekday()
-TARGET   = HORAS_LJ if dow <= 4 else HORAS_V
+perfil, cfg = horario_conf.resolve(mes=check_date.month)
+HORAS_LJ    = int(cfg.get("HORAS_LJ", "480"))
+HORAS_V     = int(cfg.get("HORAS_V",  "330"))
+dow         = check_date.isoweekday()
+TARGET      = HORAS_LJ if dow <= 4 else HORAS_V
+print(f"Perfil horario: {perfil}")
 
 DIAS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
 print(f"\n{'='*50}")

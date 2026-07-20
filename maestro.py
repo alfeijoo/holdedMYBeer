@@ -16,12 +16,13 @@ import urllib.error
 from datetime import datetime, timedelta, date
 from pathlib import Path
 
+import horario_conf
+
 # ── Rutas ─────────────────────────────────────────────────────────────────
 
 HOME           = Path("/data/data/com.termux/files/home")
 FICHAJE        = HOME / "holdedMYBeer"
 LOG_FILE       = FICHAJE / "holdmybeer.log"
-CONFIG         = FICHAJE / "horario.conf"
 ACCION         = FICHAJE / "accion.py"
 AUSENCIAS      = FICHAJE / "ausencias.txt"
 AUSENCIAS_CACHE = FICHAJE / "ausencias_cache.json"
@@ -91,28 +92,6 @@ def notify(msg):
         urllib.request.urlopen(req, timeout=10)
     except Exception:
         pass
-
-# ── Config ────────────────────────────────────────────────────────────────
-
-def load_config():
-    defaults = {
-        "ENTRADA_BASE":      "08:00",
-        "ENTRADA_VARIACION": "16",
-        "PAUSA_BASE":        "13:00",
-        "PAUSA_VARIACION":   "60",
-        "PAUSA_DURACION":    "60",
-        "HORAS_LJ":          "480",
-        "HORAS_V":           "330",
-    }
-    if CONFIG.exists():
-        for line in CONFIG.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            m = re.match(r'^(\w+)="?([^"#]*)"?', line)
-            if m:
-                defaults[m.group(1)] = m.group(2).strip()
-    return defaults
 
 def hhmm_to_min(hhmm):
     h, m = hhmm.split(":")
@@ -327,15 +306,6 @@ def schedule(hhmm, action, acum, tomorrow_str):
 # ── Main ──────────────────────────────────────────────────────────────────
 
 rotate_log()
-cfg = load_config()
-
-entrada_base = hhmm_to_min(cfg["ENTRADA_BASE"])
-entrada_var  = int(cfg["ENTRADA_VARIACION"])
-pausa_base   = hhmm_to_min(cfg["PAUSA_BASE"])
-pausa_var    = int(cfg["PAUSA_VARIACION"])
-pausa_dur    = int(cfg["PAUSA_DURACION"])
-horas_lj     = int(cfg["HORAS_LJ"])
-horas_v      = int(cfg["HORAS_V"])
 
 tomorrow = datetime.now() + timedelta(days=1)
 t_dow    = tomorrow.isoweekday()
@@ -345,11 +315,31 @@ t_str    = tomorrow.strftime("%Y-%m-%d")
 t_dname  = DIAS[tomorrow.weekday()]
 t_date   = tomorrow.date()
 
-log(f"Planificando {t_str} ({t_dname})")
+perfil, cfg    = horario_conf.resolve(mes=t_mon)
+perfil_hoy, _  = horario_conf.resolve(mes=datetime.now().month)
+cambio_perfil  = perfil_hoy != perfil
+
+def _nombre_amigable(nombre):
+    return "horario normal" if nombre == "DEFAULT" else f"horario {nombre}"
+
+entrada_base = hhmm_to_min(cfg["ENTRADA_BASE"])
+entrada_var  = int(cfg["ENTRADA_VARIACION"])
+pausa_base   = hhmm_to_min(cfg["PAUSA_BASE"])
+pausa_var    = int(cfg["PAUSA_VARIACION"])
+pausa_dur    = int(cfg["PAUSA_DURACION"])
+horas_lj     = int(cfg["HORAS_LJ"])
+horas_v      = int(cfg["HORAS_V"])
+pausa_viernes = cfg.get("PAUSA_VIERNES", "no").strip().lower() == "si"
+
+log(f"Planificando {t_str} ({t_dname}) — perfil horario: {perfil}"
+    + (f" (cambio desde {perfil_hoy})" if cambio_perfil else ""))
 
 if t_dow >= 6:
     log(f"{t_dname}: no se trabaja. Nada programado.")
-    notify(random.choice(FRASES_FINDE))
+    msg_finde = random.choice(FRASES_FINDE)
+    if cambio_perfil:
+        msg_finde += f"\n\n🔄 Cambio de perfil a partir del {t_day} {MESES[t_mon-1]}: {_nombre_amigable(perfil_hoy)} → {_nombre_amigable(perfil)}"
+    notify(msg_finde)
     sys.exit(0)
 
 token, account_id = extract_token()
@@ -363,33 +353,39 @@ ausencias = fetch_ausencias(token, account_id)
 
 if t_date in ausencias:
     log(f"{t_str}: AUSENCIA detectada via API. Nada programado.")
-    notify(f"📅 Mañana ({t_dname} {t_day} {MESES[t_mon-1]}) es festivo/ausencia. No se ficha.")
+    msg_ausencia = f"📅 Mañana ({t_dname} {t_day} {MESES[t_mon-1]}) es festivo/ausencia. No se ficha."
+    if cambio_perfil:
+        msg_ausencia += f"\n\n🔄 Cambio de perfil a partir del {t_day} {MESES[t_mon-1]}: {_nombre_amigable(perfil_hoy)} → {_nombre_amigable(perfil)}"
+    notify(msg_ausencia)
     sys.exit(0)
 
-entrada_min = entrada_base + random.randint(0, entrada_var)
+entrada_min  = entrada_base + random.randint(0, entrada_var)
+target_horas = horas_lj if t_dow <= 4 else horas_v
+con_pausa    = t_dow <= 4 or (t_dow == 5 and pausa_viernes)
 
-if t_dow <= 4:
+if con_pausa:
     pausa_ini  = pausa_base + random.randint(0, pausa_var)
     pausa_fin  = pausa_ini + pausa_dur
-    salida_min = entrada_min + horas_lj + pausa_dur
+    salida_min = entrada_min + target_horas + pausa_dur
     trabajado  = salida_min - entrada_min - pausa_dur
-    if trabajado != horas_lj:
-        msg = f"Verificacion L-J: trabajado={trabajado}min esperado={horas_lj}min. Abortando."
+    etiqueta   = "L-J" if t_dow <= 4 else "V (con pausa)"
+    if trabajado != target_horas:
+        msg = f"Verificacion {etiqueta}: trabajado={trabajado}min esperado={target_horas}min. Abortando."
         err(msg)
         notify(f"❌ MAESTRO ERROR: {msg}")
         sys.exit(1)
-    total_min = horas_lj
-    tipo      = f"L-J ({horas_lj // 60}h)"
+    total_min = target_horas
+    tipo      = f"{etiqueta} ({target_horas // 60}h{target_horas % 60:02d}m)"
 else:
-    salida_min = entrada_min + horas_v
+    salida_min = entrada_min + target_horas
     trabajado  = salida_min - entrada_min
-    if trabajado != horas_v:
-        msg = f"Verificacion V: trabajado={trabajado}min esperado={horas_v}min. Abortando."
+    if trabajado != target_horas:
+        msg = f"Verificacion V: trabajado={trabajado}min esperado={target_horas}min. Abortando."
         err(msg)
         notify(f"❌ MAESTRO ERROR: {msg}")
         sys.exit(1)
-    total_min = horas_v
-    tipo      = f"Viernes ({horas_v // 60}h{horas_v % 60}m)"
+    total_min = target_horas
+    tipo      = f"Viernes ({target_horas // 60}h{target_horas % 60}m)"
 
 h_entrada = min_to_hhmm(entrada_min)
 h_salida  = min_to_hhmm(salida_min)
@@ -397,7 +393,7 @@ h_salida  = min_to_hhmm(salida_min)
 log(f"Plan {t_str} ({t_dname} / {tipo})")
 log(f"  ENTRADA : {h_entrada}")
 
-if t_dow <= 4:
+if con_pausa:
     h_pausa_ini = min_to_hhmm(pausa_ini)
     h_pausa_fin = min_to_hhmm(pausa_fin)
     acum_pausa  = pausa_ini - entrada_min
@@ -408,7 +404,7 @@ log(f"  TOTAL   : {total_min}min verificado OK")
 
 schedule(h_entrada, "ENTRADA", 0, t_str)
 
-if t_dow <= 4:
+if con_pausa:
     schedule(h_pausa_ini, "INICIO_PAUSA", acum_pausa, t_str)
     job_fin_pausa = schedule(h_pausa_fin, "FIN_PAUSA", acum_pausa, t_str)
 
@@ -420,7 +416,7 @@ plan = {
     "jobs": {"SALIDA": job_salida},
     "horas_total": total_min,
 }
-if t_dow <= 4:
+if con_pausa:
     plan["scheduled"]["FIN_PAUSA"] = h_pausa_fin
     plan["jobs"]["FIN_PAUSA"] = job_fin_pausa
     plan["pausa_dur"] = pausa_dur
@@ -431,9 +427,10 @@ log("-" * 40)
 
 # ── Notificacion Telegram ──────────────────────────────────────────────────
 
-if t_dow <= 4:
+if con_pausa:
     msg = (
         f"📋 Plan fichaje {t_dname} {t_day} {MESES[t_mon-1]}\n"
+        f"⚙️ Perfil   : {_nombre_amigable(perfil)}\n"
         f"🟢 Entrada  : {h_entrada}\n"
         f"⏸ Pausa    : {h_pausa_ini} - {h_pausa_fin}\n"
         f"🔴 Salida   : {h_salida}\n"
@@ -442,10 +439,14 @@ if t_dow <= 4:
 else:
     msg = (
         f"📋 Plan fichaje {t_dname} {t_day} {MESES[t_mon-1]}\n"
+        f"⚙️ Perfil   : {_nombre_amigable(perfil)}\n"
         f"🟢 Entrada  : {h_entrada}\n"
         f"🔴 Salida   : {h_salida}\n"
         f"⏱ Total    : {total_min // 60}h{total_min % 60:02d}m"
     )
+
+if cambio_perfil:
+    msg += f"\n\n🔄 Cambio de perfil hoy: {_nombre_amigable(perfil_hoy)} → {_nombre_amigable(perfil)}"
 
 if t_dow == 4:
     prox = proximo_festivo(t_date, ausencias)

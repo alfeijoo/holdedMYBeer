@@ -15,6 +15,8 @@ import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import horario_conf
+
 HOME    = Path("/data/data/com.termux/files/home")
 FICHAJE = HOME / "holdedMYBeer"
 LOG     = FICHAJE / "holdmybeer.log"
@@ -34,16 +36,24 @@ def _help_text():
     return f"""\
 🤖 {BOT_NAME} - Fichaje Holded
 
-/entrada  - Fichar entrada
-/pausa    - Iniciar pausa
-/resume   - Volver del descanso
-/salida   - Fichar salida
-/estado   - Estado del timer actual
-/log      - Ultimas lineas del log
-/plan        - Jobs programados (at)
-/recalcular  - Recalcular y reprogramar salida
-/corregir    - Corregir fichaje (ayer por defecto, o /corregir DD-MM-YYYY)
-/help        - Este mensaje"""
+/entrada    - Fichar entrada
+/pausa      - Iniciar pausa
+/resume     - Volver del descanso
+/salida     - Fichar salida
+/estado     - Estado del timer actual
+/log        - Últimas líneas del log
+/plan       - Jobs programados (at)
+/recalcular - Recalcular y reprogramar salida
+/corregir   - Corregir fichaje (ayer, o /corregir DD-MM-YYYY)
+/revisar    - Revisar y corregir últimos 7 días laborables
+/festivo    - Próximos festivos del calendario
+/horario    - Ver perfil de horario activo
+/horario listar             - Listar perfiles disponibles
+/horario usar <perfil|auto> - Forzar perfil activo
+/horario nuevo <n> [meses]  - Crear perfil (ej: /horario nuevo verano 7,8)
+/horario set <perfil> <clave> <valor> - Editar un valor
+/horario borrar <perfil>    - Borrar perfil
+/help       - Este mensaje"""
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────
@@ -117,17 +127,6 @@ def _get_tracker(token, account_id):
 
 # ── API helpers ───────────────────────────────────────────────────────────
 
-def _load_conf():
-    cfg = {}
-    conf = FICHAJE / "horario.conf"
-    if conf.exists():
-        for line in conf.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.split("#")[0].strip().strip('"')
-    return cfg
-
 def _api_get(path, token, account_id, base=BASE_APP):
     req = urllib.request.Request(base + path, method="GET")
     req.add_header("token", token)
@@ -156,40 +155,46 @@ def _api_put(path, token, account_id, body, base=BASE_APP):
     except Exception:
         return None, {}
 
-def _corregir_fecha(date_str, target_min, token, account_id):
+def _corregir_fecha(date_str, target_min, token, account_id, cfg):
     import urllib.parse
-    tz_offset = datetime.now().astimezone().strftime("%z")
-    tz_colon  = tz_offset[:3] + ":" + tz_offset[3:]
+    pausa_dur  = int(cfg.get("PAUSA_DURACION", "60"))
+    tz_offset  = datetime.now().astimezone().strftime("%z")
+    tz_colon   = tz_offset[:3] + ":" + tz_offset[3:]
     date_param = urllib.parse.quote(f"{date_str}T00:00:00{tz_colon}")
 
     status, data = _api_get(f"/internal/team/v2/day-timetracking?date={date_param}", token, account_id)
     if status != 200:
-        return f"❌ GET day-timetracking {date_str}: status={status}"
+        return f"❌ GET {date_str}: status={status}"
 
     trackers = data.get("trackers", [])
     if not trackers:
-        return f"❌ Sin trackers en Holded para {date_str}"
+        return f"⚪ {date_str}: sin tracker en Holded"
 
     tracker = trackers[0]
     if not tracker.get("done"):
-        return f"⚠️ Tracker de {date_str} aún en curso"
+        return f"⏳ {date_str}: tracker aún en curso"
 
-    effective_min = round(tracker.get("effectiveWorkedTime", 0) / 60)
-    delta = effective_min - target_min
+    end_dt    = datetime.fromisoformat(tracker["end"]).astimezone()
+    start_dt  = datetime.fromisoformat(tracker["startDateWithTimeZone"]).astimezone()
+    start_min = start_dt.replace(second=0, microsecond=0)
 
-    if delta == 0:
-        return f"✅ {date_str}: {effective_min}min = objetivo {target_min}min. Sin corrección."
+    raw_pauses      = tracker.get("pauses", [])
+    total_pause_min = pausa_dur * len(raw_pauses)
+    new_end         = start_min + timedelta(minutes=target_min + total_pause_min)
 
-    end_dt   = datetime.fromisoformat(tracker["end"])
-    new_end  = (end_dt - timedelta(minutes=delta)).astimezone()
-    old_hhmm = end_dt.astimezone().strftime("%H:%M")
+    old_hhmm = end_dt.strftime("%H:%M")
     new_hhmm = new_end.strftime("%H:%M")
 
-    pauses = [
-        {"start": datetime.fromisoformat(p["start"]).astimezone().strftime("%H:%M"),
-         "end":   datetime.fromisoformat(p["end"]).astimezone().strftime("%H:%M")}
-        for p in tracker.get("pauses", [])
-    ]
+    if new_end == end_dt.replace(second=0, microsecond=0):
+        return f"✅ {date_str}: {start_dt.strftime('%H:%M')}→{old_hhmm} ({target_min}min) OK"
+
+    delta = round((new_end - end_dt).total_seconds() / 60)
+
+    pauses = []
+    for p in raw_pauses:
+        p_start = datetime.fromisoformat(p["start"]).astimezone().replace(second=0, microsecond=0)
+        p_end   = p_start + timedelta(minutes=pausa_dur)
+        pauses.append({"start": p_start.strftime("%H:%M"), "end": p_end.strftime("%H:%M")})
 
     body = {"trackers": [{
         "id":          tracker["id"],
@@ -200,22 +205,16 @@ def _corregir_fecha(date_str, target_min, token, account_id):
         "pauses":      pauses,
     }]}
 
-    status2, resp2 = _api_put("/internal/team/v2/bulk-timetracking-update", token, account_id, body)
+    status2, _ = _api_put("/internal/team/v2/bulk-timetracking-update", token, account_id, body)
     if status2 and status2 < 400:
-        return (f"✅ {date_str}: fichado={effective_min}min objetivo={target_min}min\n"
-                f"Salida corregida: {old_hhmm}→{new_hhmm} ({delta:+d}min)")
+        return f"🔧 {date_str}: {start_dt.strftime('%H:%M')}→{old_hhmm}→{new_hhmm} ({delta:+d}min)"
     else:
-        return (f"❌ PUT bulk-timetracking-update: status={status2}\n"
-                f"fichado={effective_min}min objetivo={target_min}min ({delta:+d}min)")
+        return f"❌ {date_str}: PUT fallido status={status2}"
 
 def cmd_corregir(date_arg=None):
     token, account_id = _read_mmkv()
     if not token or not account_id:
         return "❌ No se pudo leer token de MMKV"
-
-    cfg      = _load_conf()
-    horas_lj = int(cfg.get("HORAS_LJ", "480"))
-    horas_v  = int(cfg.get("HORAS_V",  "330"))
 
     if date_arg:
         try:
@@ -230,8 +229,34 @@ def cmd_corregir(date_arg=None):
     if d.isoweekday() >= 6:
         return f"❌ {d} es fin de semana — no hay fichaje que corregir"
 
-    target = horas_lj if d.isoweekday() <= 4 else horas_v
-    return _corregir_fecha(d.strftime("%Y-%m-%d"), target, token, account_id)
+    _, cfg   = horario_conf.resolve(mes=d.month)
+    horas_lj = int(cfg.get("HORAS_LJ", "480"))
+    horas_v  = int(cfg.get("HORAS_V",  "330"))
+    target   = horas_lj if d.isoweekday() <= 4 else horas_v
+    return _corregir_fecha(d.strftime("%Y-%m-%d"), target, token, account_id, cfg)
+
+
+def cmd_revisar():
+    token, account_id = _read_mmkv()
+    if not token or not account_id:
+        return "❌ No se pudo leer token de MMKV"
+
+    dias_laborables = []
+    d = datetime.now().date() - timedelta(days=1)
+    while len(dias_laborables) < 7:
+        if d.isoweekday() <= 5:
+            dias_laborables.append(d)
+        d -= timedelta(days=1)
+
+    lines = ["🔍 Revisión últimos 7 días laborables:"]
+    for dia in dias_laborables:
+        _, cfg   = horario_conf.resolve(mes=dia.month)
+        horas_lj = int(cfg.get("HORAS_LJ", "480"))
+        horas_v  = int(cfg.get("HORAS_V",  "330"))
+        target   = horas_lj if dia.isoweekday() <= 4 else horas_v
+        lines.append(_corregir_fecha(dia.strftime("%Y-%m-%d"), target, token, account_id, cfg))
+
+    return "\n".join(lines)
 
 
 # ── Comandos ──────────────────────────────────────────────────────────────
@@ -426,6 +451,72 @@ def cmd_recalcular():
     return "\n".join(lines)
 
 
+def cmd_festivo():
+    cache = FICHAJE / "ausencias_cache.json"
+    ausencias_txt = FICHAJE / "ausencias.txt"
+
+    dias = set()
+    if cache.exists():
+        try:
+            data = json.loads(cache.read_text())
+            from datetime import date as _date
+            dias = {_date.fromisoformat(d) for d in data.get("dates", [])}
+        except Exception:
+            pass
+
+    if ausencias_txt.exists():
+        from datetime import date as _date
+        for line in ausencias_txt.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                parts = line.split("-")
+                if len(parts) == 3:
+                    dias.add(_date(int(parts[0]), int(parts[1]), int(parts[2])))
+            except Exception:
+                pass
+
+    if not dias:
+        return "❌ Sin datos de ausencias/festivos (cache vacía)"
+
+    hoy = datetime.now().date()
+    proximos = sorted(d for d in dias if d > hoy and d.weekday() < 5)
+
+    if not proximos:
+        return "🤷 Sin festivos laborables próximos en el calendario"
+
+    DIAS_ES  = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
+    MESES_ES = ["enero","febrero","marzo","abril","mayo","junio",
+                "julio","agosto","septiembre","octubre","noviembre","diciembre"]
+
+    def _fmt(d):
+        return f"{DIAS_ES[d.weekday()]} {d.day} {MESES_ES[d.month-1]}"
+
+    # Agrupar días consecutivos (tolerancia 3 días para salvar fines de semana)
+    bloques = []
+    inicio = fin = proximos[0]
+    for d in proximos[1:]:
+        if (d - fin).days <= 3:
+            fin = d
+        else:
+            bloques.append((inicio, fin))
+            inicio = fin = d
+    bloques.append((inicio, fin))
+
+    lines = ["📅 Próximos festivos:"]
+    for ini, fin in bloques[:5]:
+        dias_para = (ini - hoy).days
+        cuando = f"en {dias_para} día{'s' if dias_para != 1 else ''}"
+        if ini == fin:
+            lines.append(f"  {_fmt(ini)} {ini.year} ({cuando})")
+        else:
+            n_lab = sum(1 for d in proximos if ini <= d <= fin)
+            lines.append(f"  {_fmt(ini)} → {_fmt(fin)} {fin.year} — {n_lab} días laborables ({cuando})")
+
+    return "\n".join(lines)
+
+
 def cmd_plan():
     r = subprocess.run(["atq"], capture_output=True, text=True)
     if not r.stdout.strip():
@@ -438,6 +529,67 @@ def cmd_plan():
         else:
             lines.append(f"  {line}")
     return "📅 Jobs programados:\n" + "\n".join(lines)
+
+
+def cmd_horario(args):
+    if not args:
+        nombre, cfg = horario_conf.resolve()
+        forced = horario_conf.active_override()
+        modo = "forzado" if forced else "automático (mes actual)"
+        lines = [f"⚙️ Perfil activo: {nombre} ({modo})", ""]
+        for k in ("ENTRADA_BASE", "ENTRADA_VARIACION", "PAUSA_BASE",
+                  "PAUSA_VARIACION", "PAUSA_DURACION", "HORAS_LJ", "HORAS_V"):
+            lines.append(f"  {k} = {cfg.get(k, '?')}")
+        return "\n".join(lines)
+
+    sub = args[0].lower()
+
+    if sub == "listar":
+        activo, _ = horario_conf.resolve()
+        lines = ["📋 Perfiles:"]
+        for nombre, meses in horario_conf.listar():
+            meses_str = ",".join(str(m) for m in meses) if meses else "-"
+            marca = " ← activo" if nombre == activo else ""
+            lines.append(f"  {nombre}  meses={meses_str}{marca}")
+        return "\n".join(lines)
+
+    if sub == "usar":
+        if len(args) < 2:
+            return "❌ Uso: /horario usar <perfil|auto>"
+        try:
+            horario_conf.set_active(args[1])
+        except ValueError as e:
+            return f"❌ {e}"
+        return f"✅ Perfil activo forzado a: {args[1]}"
+
+    if sub == "nuevo":
+        if len(args) < 2:
+            return "❌ Uso: /horario nuevo <nombre> [meses, ej: 7,8]"
+        try:
+            horario_conf.crear_perfil(args[1], args[2] if len(args) > 2 else None)
+        except ValueError as e:
+            return f"❌ {e}"
+        return f"✅ Perfil creado: {args[1]}"
+
+    if sub == "borrar":
+        if len(args) < 2:
+            return "❌ Uso: /horario borrar <perfil>"
+        try:
+            horario_conf.borrar_perfil(args[1])
+        except ValueError as e:
+            return f"❌ {e}"
+        return f"✅ Perfil borrado: {args[1]}"
+
+    if sub == "set":
+        if len(args) < 4:
+            return "❌ Uso: /horario set <perfil> <clave> <valor>"
+        try:
+            valor_ok = horario_conf.set_value(args[1], args[2], args[3])
+        except ValueError as e:
+            return f"❌ {e}"
+        return f"✅ {args[1]}.{args[2]} = {valor_ok}"
+
+    return "❌ Subcomando desconocido. Usa: /horario [listar|usar|nuevo|borrar|set]"
 
 
 # ── Dispatch ──────────────────────────────────────────────────────────────
@@ -465,6 +617,12 @@ def handle(text):
     elif cmd == "/corregir":
         parts = text.strip().split()
         reply(cmd_corregir(parts[1] if len(parts) > 1 else None))
+    elif cmd == "/revisar":
+        reply(cmd_revisar())
+    elif cmd == "/festivo":
+        reply(cmd_festivo())
+    elif cmd == "/horario":
+        reply(cmd_horario(text.strip().split()[1:]))
     elif cmd in ("/help", "/start", "/ayuda"):
         reply(_help_text())
     else:

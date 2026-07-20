@@ -18,6 +18,8 @@ from datetime import datetime, timezone, timedelta
 import urllib.parse
 from pathlib import Path
 
+import horario_conf
+
 # ── Rutas ─────────────────────────────────────────────────────────────────
 
 HOME      = Path("/data/data/com.termux/files/home")
@@ -32,18 +34,7 @@ ADB_HOST  = "127.0.0.1:5555"
 os.environ["ADB_VENDOR_KEYS"] = str(ADB_KEYS)
 os.environ["PATH"] = "/data/data/com.termux/files/usr/bin:" + os.environ.get("PATH", "")
 
-def _load_conf():
-    cfg = {}
-    conf = FICHAJE / "horario.conf"
-    if conf.exists():
-        for line in conf.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.strip().strip('"')
-    return cfg
-
-_CONF = _load_conf()
+PERFIL, _CONF = horario_conf.resolve()
 UNLOCK_PIN = _CONF.get("UNLOCK_PIN", "0000")
 
 # ── Args ──────────────────────────────────────────────────────────────────
@@ -307,8 +298,8 @@ def resume(token, account_id, tracker_id):
 def corregir_salida(token, account_id):
     dow       = datetime.now().isoweekday()
     today_str = datetime.now().strftime("%Y-%m-%d")
-    horas_lj  = int(_CONF.get("HORAS_LJ", "480").split("#")[0].strip())
-    horas_v   = int(_CONF.get("HORAS_V",  "330").split("#")[0].strip())
+    horas_lj  = int(_CONF.get("HORAS_LJ", "480"))
+    horas_v   = int(_CONF.get("HORAS_V",  "330"))
     target    = horas_lj if dow <= 4 else horas_v
 
     tz_offset  = datetime.now().astimezone().strftime("%z")
@@ -330,25 +321,33 @@ def corregir_salida(token, account_id):
         log(f"[CORREC] Sin tracker completado para {today_str}")
         return
 
-    tracker       = trackers[0]
-    effective_min = round(tracker.get("effectiveWorkedTime", 0) / 60)
-    delta         = effective_min - target
+    tracker  = trackers[0]
+    end_dt   = datetime.fromisoformat(tracker["end"]).astimezone()
+    old_hhmm = end_dt.strftime("%H:%M")
 
-    log(f"[CORREC] real={effective_min}min objetivo={target}min delta={delta:+d}min")
+    start_dt  = datetime.fromisoformat(tracker["startDateWithTimeZone"]).astimezone()
+    start_min = start_dt.replace(second=0, microsecond=0)
 
-    if delta == 0:
-        return
+    pausa_dur       = int(_CONF.get("PAUSA_DURACION", "60"))
+    raw_pauses      = tracker.get("pauses", [])
+    total_pause_min = pausa_dur * len(raw_pauses)
 
-    end_dt   = datetime.fromisoformat(tracker["end"])
-    new_end  = (end_dt - timedelta(minutes=delta)).astimezone()
-    old_hhmm = end_dt.astimezone().strftime("%H:%M")
+    new_end  = start_min + timedelta(minutes=target + total_pause_min)
     new_hhmm = new_end.strftime("%H:%M")
 
-    pauses = [
-        {"start": datetime.fromisoformat(p["start"]).astimezone().strftime("%H:%M"),
-         "end":   datetime.fromisoformat(p["end"]).astimezone().strftime("%H:%M")}
-        for p in tracker.get("pauses", [])
-    ]
+    effective_min = round(tracker.get("effectiveWorkedTime", 0) / 60)
+    delta         = round((new_end - end_dt).total_seconds() / 60)
+
+    log(f"[CORREC] perfil={PERFIL} start={start_min.strftime('%H:%M')} pausa={total_pause_min}min real={effective_min}min objetivo={target}min → {old_hhmm}→{new_hhmm} ({delta:+d}min)")
+
+    if new_end == end_dt.replace(second=0, microsecond=0):
+        return
+
+    pauses = []
+    for p in raw_pauses:
+        p_start = datetime.fromisoformat(p["start"]).astimezone().replace(second=0, microsecond=0)
+        p_end   = p_start + timedelta(minutes=pausa_dur)
+        pauses.append({"start": p_start.strftime("%H:%M"), "end": p_end.strftime("%H:%M")})
     put_body = {"trackers": [{
         "id":          tracker["id"],
         "workplaceId": tracker.get("workplaceId"),
@@ -360,7 +359,8 @@ def corregir_salida(token, account_id):
 
     s2, b2 = api("PUT", BASE_APP, "/internal/team/v2/bulk-timetracking-update", token, account_id, put_body)
     if s2 and s2 < 400:
-        msg = f"✅ Fichaje corregido: salida {old_hhmm}→{new_hhmm} ({delta:+d}min)"
+        correc_hhmm = datetime.now().astimezone().strftime("%H:%M")
+        msg = f"✅ Fichaje corregido a las {correc_hhmm}: salida {old_hhmm}→{new_hhmm} ({delta:+d}min)"
         log(f"[CORREC] {msg}")
         notify(msg)
     else:

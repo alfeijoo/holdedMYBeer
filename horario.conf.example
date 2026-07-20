@@ -1,0 +1,34 @@
+# Horario de trabajo - Fichaje Holded
+# [DEFAULT] = valores base, heredados por cualquier otro perfil.
+# Cada perfil adicional solo declara lo que cambia respecto a DEFAULT.
+# MESES = lista de meses (1-12) en que el perfil se activa automaticamente.
+# PAUSA_VIERNES = si/no -- si el viernes tambien lleva pausa (por defecto no).
+# Override manual: /horario usar <perfil|auto> en Telegram.
+
+[DEFAULT]
+ENTRADA_BASE = 08:00     # hora base de entrada
+ENTRADA_VARIACION = 16   # random +0..16 min
+PAUSA_BASE = 13:00       # hora base inicio pausa (L-J)
+PAUSA_VARIACION = 60     # random +0..60 min
+PAUSA_DURACION = 60      # duracion pausa en minutos
+PAUSA_VIERNES = no       # si el viernes tambien lleva pausa (por defecto no)
+HORAS_LJ = 480           # total minutos L-J (480 = 8h)
+HORAS_V = 330            # total minutos viernes (330 = 5h30m, sin pausa)
+
+UNLOCK_PIN = 0000
+GOOGLE_ACCOUNT = Nombre Apellido (Alias)
+HOLDED_COMPANY = Empresa S.L. / Grupo
+
+# Perfil de ejemplo: horario de verano, activo solo en agosto.
+# Sin MESES, un perfil existe pero nunca se activa solo (hay que forzarlo
+# con /horario usar <perfil>).
+[verano]
+MESES = 8                # agosto usa este perfil automaticamente
+ENTRADA_BASE = 08:00     # entrada 08:00-08:15
+ENTRADA_VARIACION = 15
+PAUSA_BASE = 12:00       # pausa entre 12:00-12:30
+PAUSA_VARIACION = 30
+PAUSA_DURACION = 15
+PAUSA_VIERNES = si       # viernes tambien lleva pausa e igual jornada
+HORAS_LJ = 420           # 7h todos los dias L-V
+HORAS_V = 420

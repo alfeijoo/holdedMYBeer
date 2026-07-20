@@ -18,7 +18,10 @@ holdedMYBeer/
 |- bot.py           # Bot Telegram - comandos manuales (cron cada minuto)
 |- relogin.py       # Re-login automatico cuando caduca la sesion
 |- simulacro.py     # Test completo ENTRADA->PAUSA->RESUME->SALIDA
-|- horario.conf     # Horas base, variaciones, PIN, cuenta Google
+|- horario_conf.py  # Resolver de perfiles de horario.conf (compartido)
+|- horario.conf     # Horas base, PIN, cuenta Google, perfiles por mes (no en repo)
+|- horario.conf.example  # Plantilla
+|- horario_active.txt  # Override manual de perfil activo (runtime, no en repo)
 |- ausencias.txt    # Festivos de fallback manual
 |- telegram.conf    # Token y chat_id del bot (no en repo)
 |- telegram.conf.example  # Plantilla
@@ -260,13 +263,20 @@ Permite controlar el fichaje manualmente desde Telegram.
 | `/corregir` | Revisar y corregir fichaje (ayer por defecto) |
 | `/corregir DD-MM-YYYY` | Revisar y corregir fichaje de fecha concreta |
 | `/recalcular` | Recalcular y reprogramar at jobs del dia |
+| `/festivo` | Proximos festivos del calendario |
+| `/horario` | Ver perfil de horario activo y sus valores |
+| `/horario listar` | Listar perfiles disponibles |
+| `/horario usar <perfil\|auto>` | Forzar perfil activo (auto = por mes) |
+| `/horario nuevo <nombre> [meses]` | Crear perfil (ej: `/horario nuevo verano 7,8`) |
+| `/horario set <perfil> <clave> <valor>` | Editar un valor de un perfil |
+| `/horario borrar <perfil>` | Borrar perfil |
 | `/help` | Lista de comandos |
 
 ## Instalacion en el dispositivo
 
 ```bash
 DEST=/data/data/com.termux/files/home/holdedMYBeer
-for f in maestro.py accion.py bot.py relogin.py simulacro.py horario.conf ausencias.txt telegram.conf; do
+for f in maestro.py accion.py bot.py relogin.py simulacro.py horario_conf.py horario.conf ausencias.txt telegram.conf; do
     adb push $f /data/local/tmp/$f
     adb shell "cp /data/local/tmp/$f $DEST/$f && chown u0_a174:u0_a174 $DEST/$f && chmod 755 $DEST/$f"
 done
@@ -288,19 +298,62 @@ pkg install android-tools python at
 
 ## Configuracion (horario.conf)
 
-```ini
-ENTRADA_BASE="08:00"    # hora base de entrada
-ENTRADA_VARIACION=16    # random +0..16 min
-PAUSA_BASE="13:00"      # hora base inicio pausa (L-J)
-PAUSA_VARIACION=60      # random +0..60 min
-PAUSA_DURACION=60       # duracion pausa en minutos
-HORAS_LJ=480            # total minutos L-J (480 = 8h)
-HORAS_V=330             # total minutos viernes (330 = 5h30m)
+`horario.conf` no esta en el repo (contiene PIN y datos de cuenta) — copiar
+de `horario.conf.example` y rellenar:
 
-UNLOCK_PIN=1440         # PIN de desbloqueo de pantalla
-GOOGLE_ACCOUNT="Nombre Apellido (Alias)"
-HOLDED_COMPANY="Empresa S.L. / Grupo"
+```bash
+cp horario.conf.example horario.conf
 ```
+
+Formato INI con perfiles. `[DEFAULT]` son los valores base, heredados por
+cualquier otro perfil (cada perfil solo declara lo que cambia). `MESES` activa
+un perfil automaticamente en esos meses del año; sin `MESES` el perfil solo
+se usa si se fuerza a mano.
+
+```ini
+[DEFAULT]
+ENTRADA_BASE = 08:00     # hora base de entrada
+ENTRADA_VARIACION = 16   # random +0..16 min
+PAUSA_BASE = 13:00       # hora base inicio pausa (L-J)
+PAUSA_VARIACION = 60     # random +0..60 min
+PAUSA_DURACION = 60      # duracion pausa en minutos
+PAUSA_VIERNES = no       # si el viernes tambien lleva pausa (por defecto no)
+HORAS_LJ = 480           # total minutos L-J (480 = 8h)
+HORAS_V = 330            # total minutos viernes (330 = 5h30m, sin pausa)
+
+UNLOCK_PIN = 1440
+GOOGLE_ACCOUNT = Nombre Apellido (Alias)
+HOLDED_COMPANY = Empresa S.L. / Grupo
+
+[verano]
+MESES = 8                # agosto usa este perfil automaticamente
+ENTRADA_BASE = 08:00     # entrada 08:00-08:15
+ENTRADA_VARIACION = 15
+PAUSA_BASE = 12:00
+PAUSA_VARIACION = 30     # pausa entre 12:00-12:30
+PAUSA_DURACION = 15
+PAUSA_VIERNES = si       # viernes tambien lleva pausa e igual jornada
+HORAS_LJ = 420           # 7h todos los dias L-V
+HORAS_V = 420
+```
+
+Resolucion del perfil activo (`maestro.py` la aplica sobre el mes del dia que
+planifica, no el mes actual):
+
+1. Override manual (`horario_active.txt`, gestionado por `/horario usar`) si existe.
+2. Primer perfil cuyo `MESES` incluye el mes en cuestion.
+3. `DEFAULT` si ninguno matchea.
+
+Los perfiles se gestionan a mano editando `horario.conf`, o via Telegram con
+`/horario` (ver [Bot Telegram](#bot-telegram)). Claves editables por bot:
+`ENTRADA_BASE`, `ENTRADA_VARIACION`, `PAUSA_BASE`, `PAUSA_VARIACION`,
+`PAUSA_DURACION`, `PAUSA_VIERNES`, `HORAS_LJ`, `HORAS_V`, `MESES` —
+`UNLOCK_PIN`, `GOOGLE_ACCOUNT` y `HOLDED_COMPANY` solo se editan a mano en
+el fichero.
+
+El mensaje diario de plan (Telegram) siempre indica el perfil activo, y
+avisa aparte si hay cambio de perfil respecto al dia anterior (ej. entrada o
+salida de horario de verano).
 
 ## Configuracion (telegram.conf)
 
