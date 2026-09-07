@@ -276,10 +276,23 @@ def api(method, base, path, token, account_id, body=None):
         return None, str(e)
 
 def get_tracker(token, account_id):
-    status, body = api("GET", BASE_MOBILE, "/internal/team/employee/current/tracker", token, account_id)
-    if status == 200 and body and body.strip() != "null":
-        return json.loads(body)
-    return None
+    """Devuelve (tracker|None, status). status permite distinguir:
+       200 + None  -> timer realmente parado
+       401         -> token caducado (el caller dispara relogin)
+       otro/None   -> fallo transitorio tras 3 intentos
+    """
+    status = None
+    for _ in range(3):
+        status, body = api("GET", BASE_MOBILE, "/internal/team/employee/current/tracker", token, account_id)
+        if status == 200:
+            if body and body.strip() != "null":
+                return json.loads(body), 200
+            return None, 200
+        if status == 401:
+            return None, 401
+        time.sleep(3)
+    err(f"[{ACTION}] get_tracker sin respuesta util tras 3 intentos (ultimo status={status})")
+    return None, status
 
 def clock_in(token, account_id):
     return api("POST", BASE_APP, "/internal/team/employee/tracker/clock-in", token, account_id)
@@ -319,6 +332,7 @@ def corregir_salida(token, account_id):
     trackers = data.get("trackers", [])
     if not trackers or not trackers[0].get("done"):
         log(f"[CORREC] Sin tracker completado para {today_str}")
+        notify(f"⚠️ CORREC: el tracker de {today_str} no quedó cerrado — corrige a mano")
         return
 
     tracker  = trackers[0]
@@ -374,18 +388,38 @@ def run_action(token, account_id):
         return clock_in(token, account_id)
 
     elif ACTION == "INICIO_PAUSA":
-        tracker = get_tracker(token, account_id)
+        tracker, tstatus = get_tracker(token, account_id)
+        if tstatus == 401:
+            return 401, "tracker 401"
         if not tracker:
             return None, "Timer no activo"
+        if tracker.get("paused"):
+            return "SKIP", "el tracker ya estaba en pausa"
         return pause(token, account_id, tracker["id"])
 
     elif ACTION == "FIN_PAUSA":
-        tracker = get_tracker(token, account_id)
+        tracker, tstatus = get_tracker(token, account_id)
+        if tstatus == 401:
+            return 401, "tracker 401"
         if not tracker:
             return None, "Timer no activo"
+        if not tracker.get("paused"):
+            return "SKIP", "el tracker no estaba en pausa"
         return resume(token, account_id, tracker["id"])
 
     elif ACTION == "SALIDA":
+        # Si quedo una pausa abierta (INICIO_PAUSA sin su FIN_PAUSA), cerrarla
+        # antes de fichar salida para que el tracker quede 'done'. Luego
+        # corregir_salida() ajusta esa pausa a PAUSA_DURACION y pone el resto
+        # como trabajado hasta cuadrar el objetivo del dia.
+        tracker, tstatus = get_tracker(token, account_id)
+        if tstatus == 401:
+            return 401, "tracker 401"
+        if tracker and tracker.get("paused"):
+            rs, _rb = resume(token, account_id, tracker["id"])
+            log(f"[SALIDA] pausa abierta detectada -> resume previo (status {rs})")
+            if not rs or rs >= 400:
+                notify(f"⚠️ SALIDA: no pude cerrar la pausa abierta (status {rs}) — revisa a mano")
         return clock_out(token, account_id)
 
     else:
@@ -418,6 +452,11 @@ if status == 401:
         msg = f"[{ACTION}] relogin fallido — accion NO ejecutada"
         err(msg)
         sys.exit(1)
+
+if status == "SKIP":
+    log(f"[{ACTION}] omitido — {body}")
+    notify(f"⚠️ {ACTION} omitido — {body}")
+    sys.exit(0)
 
 MENSAJES = {
     "ENTRADA":      f"✅ Entrada fichada",

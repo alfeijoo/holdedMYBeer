@@ -48,11 +48,11 @@ def _help_text():
 /revisar    - Revisar y corregir últimos 7 días laborables
 /festivo    - Próximos festivos del calendario
 /horario    - Ver perfil de horario activo
-/horario listar             - Listar perfiles disponibles
-/horario usar <perfil|auto> - Forzar perfil activo
-/horario nuevo <n> [meses]  - Crear perfil (ej: /horario nuevo verano 7,8)
-/horario set <perfil> <clave> <valor> - Editar un valor
-/horario borrar <perfil>    - Borrar perfil
+/horario_listar               - Listar perfiles disponibles
+/horario_usar <perfil|auto>   - Forzar perfil activo
+/horario_nuevo <n> [meses]    - Crear perfil (ej: /horario_nuevo verano 7,8)
+/horario_set <perfil> <clave> <valor> - Editar un valor
+/horario_borrar <perfil>      - Borrar perfil
 /help       - Este mensaje"""
 
 
@@ -82,6 +82,43 @@ def reply(text):
     data = json.dumps({"chat_id": TG_CHAT_ID, "text": text}).encode()
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+        data=data, method="POST"
+    )
+    req.add_header("Content-Type", "application/json")
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
+# ── Registro de comandos (menu nativo Telegram) ──────────────────────────
+
+BOT_COMMANDS = [
+    ("entrada",        "Fichar entrada"),
+    ("pausa",          "Iniciar pausa"),
+    ("resume",         "Volver del descanso"),
+    ("salida",         "Fichar salida"),
+    ("estado",         "Estado del timer actual"),
+    ("log",            "Ultimas lineas del log"),
+    ("plan",           "Jobs programados (at)"),
+    ("recalcular",     "Recalcular y reprogramar salida"),
+    ("corregir",       "Corregir fichaje (ayer o DD-MM-YYYY)"),
+    ("revisar",        "Revisar y corregir ultimos 7 dias"),
+    ("festivo",        "Proximos festivos del calendario"),
+    ("horario",        "Ver perfil de horario activo"),
+    ("horario_listar", "Listar perfiles disponibles"),
+    ("horario_usar",   "Forzar perfil activo (<perfil|auto>)"),
+    ("horario_nuevo",  "Crear perfil (<nombre> [meses])"),
+    ("horario_set",    "Editar valor (<perfil> <clave> <valor>)"),
+    ("horario_borrar", "Borrar perfil (<perfil>)"),
+    ("help",           "Este mensaje"),
+]
+
+def register_commands():
+    body = {"commands": [{"command": c, "description": d} for c, d in BOT_COMMANDS]}
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TG_TOKEN}/setMyCommands",
         data=data, method="POST"
     )
     req.add_header("Content-Type", "application/json")
@@ -621,8 +658,13 @@ def handle(text):
         reply(cmd_revisar())
     elif cmd == "/festivo":
         reply(cmd_festivo())
-    elif cmd == "/horario":
-        reply(cmd_horario(text.strip().split()[1:]))
+    elif cmd == "/horario" or cmd.startswith("/horario_"):
+        parts = text.strip().split()
+        if cmd.startswith("/horario_"):
+            args = [cmd[len("/horario_"):]] + parts[1:]
+        else:
+            args = parts[1:]                      # compat: "/horario listar"
+        reply(cmd_horario(args))
     elif cmd in ("/help", "/start", "/ayuda"):
         reply(_help_text())
     else:
@@ -661,6 +703,7 @@ if _already_running():
     sys.exit(0)
 
 PID_FILE.write_text(str(os.getpid()))
+register_commands()
 
 try:
     offset = int(OFFSET.read_text()) if OFFSET.exists() else 0

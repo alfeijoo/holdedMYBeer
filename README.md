@@ -57,6 +57,12 @@ Cada at job ejecuta `accion.py` con la accion correspondiente. Este es el flujo 
    `- Tiempo insuficiente -> dormir hasta completar las horas + continuar
 
 4. Ejecutar accion via REST API
+   |- INICIO_PAUSA / FIN_PAUSA / SALIDA -> primero GET tracker activo
+   |    |- fallo transitorio -> 3 reintentos (sleep 3s) antes de rendirse
+   |    |- 401 -> relogin.py + reintentar accion
+   |    |- INICIO_PAUSA y ya en pausa -> omitir (exit 0, aviso Telegram)
+   |    |- FIN_PAUSA y no hay pausa -> omitir (exit 0, aviso Telegram)
+   |    `- SALIDA y pausa abierta -> resume previo para cerrarla, luego clock-out
    |- 2xx OK -> log + notificar Telegram (exito)
    |- 401 Unauthorized -> ejecutar relogin.py
    |    |- relogin OK -> reintentar accion
@@ -73,9 +79,9 @@ Cada at job ejecuta `accion.py` con la accion correspondiente. Este es el flujo 
 | Accion | Que hace |
 |--------|----------|
 | `ENTRADA` | clock-in: inicia el timer del dia |
-| `INICIO_PAUSA` | obtiene tracker activo -> pausa el timer |
-| `FIN_PAUSA` | obtiene tracker activo -> reanuda el timer |
-| `SALIDA` | clock-out: finaliza el timer del dia |
+| `INICIO_PAUSA` | GET tracker activo (3 reintentos) -> pausa el timer. Si ya esta en pausa, omite |
+| `FIN_PAUSA` | GET tracker activo (3 reintentos) -> reanuda el timer. Si no hay pausa, omite |
+| `SALIDA` | Si quedo una pausa abierta la cierra (resume) -> clock-out: finaliza el timer del dia |
 
 ### Notificaciones Telegram por accion
 
@@ -87,6 +93,9 @@ Cada at job ejecuta `accion.py` con la accion correspondiente. Este es el flujo 
 | Salida OK | `🏁 Salida fichada - total: Xh00m` |
 | Fichaje corregido | `✅ Fichaje corregido: salida HH:MM→HH:MM (+Xmin)` |
 | Correc. fallo | `❌ CORREC FALLO: <codigo>` |
+| Tracker sin cerrar | `⚠️ CORREC: el tracker de YYYY-MM-DD no quedó cerrado — corrige a mano` |
+| Accion omitida (estado incoherente) | `⚠️ INICIO_PAUSA omitido — el tracker ya estaba en pausa` |
+| Pausa abierta no cerrada en salida | `⚠️ SALIDA: no pude cerrar la pausa abierta (status X) — revisa a mano` |
 | JWT expira pronto | `🔑 JWT expira pronto — refrescando token` |
 | Token no encontrado | `🔑 Token no encontrado — ejecutando re-login` |
 | Sesion caducada (401) | `🔑 Sesion caducada — ejecutando re-login` |
@@ -118,21 +127,33 @@ Ejecutado cada noche a las 23:00 por cron:
 
 ## Corrección automatica post-fichaje
 
-Inmediatamente despues de que SALIDA es confirmada por Holded, `accion.py` consulta el tiempo real registrado y lo ajusta si hay desviacion:
+Inmediatamente despues de que SALIDA es confirmada por Holded, `accion.py`
+reconstruye el registro del dia para que cuadre exactamente con el objetivo:
 
 ```
 1. GET /internal/team/v2/day-timetracking?date=HOY
-   -> leer effectiveWorkedTime (segundos netos reales en Holded)
-2. delta = real - objetivo (HORAS_LJ o HORAS_V segun dia)
-3. Si delta == 0 -> no tocar nada
-4. Si delta != 0 ->
+   |- tracker no 'done' (p.ej. pausa sin cerrar que impidio el clock-out)
+   |    -> log + aviso Telegram + abortar (corregir a mano)
+   `- tracker 'done' -> continuar
+2. objetivo = HORAS_LJ o HORAS_V segun dia
+3. Cada pausa registrada se normaliza a PAUSA_DURACION:
+   end_pausa = start_pausa + PAUSA_DURACION   (se ignora su fin real)
+4. nuevo end = start + objetivo + (PAUSA_DURACION * numero_de_pausas)
+   -> el tiempo restante del dia cuenta como trabajado hasta el objetivo
+5. Si nuevo end == end actual -> no tocar nada
+6. Si difiere ->
    PUT /internal/team/v2/bulk-timetracking-update
-   -> nuevo end = end_actual - delta (en local timezone)
-   -> pauses se preservan en formato HH:MM
+   -> start intacto, end recalculado, pauses reescritas en HH:MM
    -> notificar Telegram
 ```
 
-Ejemplo: fichado 8h04m, objetivo 8h → salida corregida 4 min antes en Holded.
+Ejemplo simple: fichado 8h04m, objetivo 8h → salida corregida 4 min antes.
+
+Ejemplo pausa sin cerrar: entrada 08:16, INICIO_PAUSA a las 13:38 falla, la
+pausa real se abre a las 14:46 y nunca se cierra. Al llegar SALIDA (17:16):
+`accion.py` detecta `paused: true`, lanza `resume` para cerrarla, ficha
+clock-out, y la correccion deja **08:16 → 17:16, pausa 14:46–15:46 (60 min),
+trabajado 8h00m**.
 
 Esta correccion actua sobre el registro de Holded del dia actual, sin tocar la planificacion de dias futuros.
 
@@ -265,12 +286,17 @@ Permite controlar el fichaje manualmente desde Telegram.
 | `/recalcular` | Recalcular y reprogramar at jobs del dia |
 | `/festivo` | Proximos festivos del calendario |
 | `/horario` | Ver perfil de horario activo y sus valores |
-| `/horario listar` | Listar perfiles disponibles |
-| `/horario usar <perfil\|auto>` | Forzar perfil activo (auto = por mes) |
-| `/horario nuevo <nombre> [meses]` | Crear perfil (ej: `/horario nuevo verano 7,8`) |
-| `/horario set <perfil> <clave> <valor>` | Editar un valor de un perfil |
-| `/horario borrar <perfil>` | Borrar perfil |
+| `/horario_listar` | Listar perfiles disponibles |
+| `/horario_usar <perfil\|auto>` | Forzar perfil activo (auto = por mes) |
+| `/horario_nuevo <nombre> [meses]` | Crear perfil (ej: `/horario_nuevo verano 7,8`) |
+| `/horario_set <perfil> <clave> <valor>` | Editar un valor de un perfil |
+| `/horario_borrar <perfil>` | Borrar perfil |
 | `/help` | Lista de comandos |
+
+Los subcomandos de horario usan `_` (un comando Telegram no puede llevar
+espacios; lo que va tras el espacio son argumentos). La forma antigua
+`/horario listar` sigue aceptandose por compatibilidad. Al arrancar, `bot.py`
+registra el menu nativo de comandos via `setMyCommands`.
 
 ## Instalacion en el dispositivo
 
