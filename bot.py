@@ -186,7 +186,8 @@ def _api_put(path, token, account_id, body, base=BASE_APP):
     req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status, json.loads(r.read().decode())
+            raw = r.read().decode()
+            return r.status, (json.loads(raw) if raw.strip() else {})
     except urllib.error.HTTPError as e:
         return e.code, {}
     except Exception:
@@ -674,18 +675,27 @@ def handle(text):
 # ── Main ──────────────────────────────────────────────────────────────────
 
 import time as _time
+import fcntl
 
-PID_FILE = FICHAJE / "bot.pid"
+PID_FILE  = FICHAJE / "bot.pid"
+LOCK_FILE = FICHAJE / "bot.lock"
 
-def _already_running():
-    if not PID_FILE.exists():
-        return False
+_LOCK_FD = None   # global: mantener el fd abierto toda la vida del proceso
+
+def _acquire_singleton():
+    """Candado exclusivo por flock. Si otro bot ya lo tiene -> None.
+       El kernel libera el lock al morir el proceso (sin PID stale)."""
+    global _LOCK_FD
+    fd = os.open(str(LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        pid = int(PID_FILE.read_text().strip())
-        Path(f"/proc/{pid}").stat()
-        return pid != os.getpid()
-    except Exception:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
         return False
+    _LOCK_FD = fd
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    return True
 
 def _process_updates(updates, offset):
     for upd in updates["result"]:
@@ -699,7 +709,7 @@ def _process_updates(updates, offset):
             handle(text)
     return offset
 
-if _already_running():
+if not _acquire_singleton():
     sys.exit(0)
 
 PID_FILE.write_text(str(os.getpid()))
@@ -710,8 +720,15 @@ try:
     while True:
         updates = tg_get(f"getUpdates?offset={offset}&timeout=30&allowed_updates=%5B%22message%22%5D")
         if updates and updates.get("ok"):
+            # Avanzar y persistir el offset ANTES de handle(): si algo revienta
+            # o se cuela un segundo poller, el update no se reprocesa.
+            new_offset = offset
+            for upd in updates["result"]:
+                if upd["update_id"] + 1 > new_offset:
+                    new_offset = upd["update_id"] + 1
+            if new_offset != offset:
+                OFFSET.write_text(str(new_offset))
             offset = _process_updates(updates, offset)
-            OFFSET.write_text(str(offset))
         else:
             _time.sleep(5)
 finally:
